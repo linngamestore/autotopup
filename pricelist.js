@@ -96,6 +96,12 @@ async function tg(env, method, body) {
     ACKED.add(body.callback_query_id);
   }
   await spinGuard(method, body);                    // a spinning button steps aside before its message is edited / deleted
+  let kbOrig = null;
+  if (body?.reply_markup && Array.isArray(body.reply_markup.keyboard)) {   // menu (reply) keyboard: put the saved premium icons on the buttons
+    await loadKbi().catch(() => {});
+    const mk = kbWithIcons(body.reply_markup);
+    if (mk !== body.reply_markup) { kbOrig = body.reply_markup; body = { ...body, reply_markup: mk }; }
+  }
   // Telegram answers 429 when many messages go out at once: wait the asked time and try again (max 2 retries).
   // A non-JSON reply (502 / HTML error page) becomes { ok: false } instead of throwing.
   for (let attempt = 0; ; attempt++) {
@@ -105,6 +111,11 @@ async function tg(env, method, body) {
     const j = await r.json().catch(() => ({ ok: false, error_code: r.status, description: `Telegram ${r.status}` }));
     if (j && j.ok === false && j.error_code === 400 && typeof body?.text === "string" && body.text.includes("<tg-emoji")) {
       body = { ...body, text: stripPremium(body.text) };   // Telegram refused the premium emoji: send the same card with the plain emoji
+      continue;
+    }
+    if (j && j.ok === false && j.error_code === 400 && kbOrig && Array.isArray(body?.reply_markup?.keyboard) && JSON.stringify(body.reply_markup).includes("icon_custom_emoji_id")) {
+      ICON_REFUSED = true;
+      body = { ...body, reply_markup: kbOrig }; kbOrig = null;   // Telegram refused the menu icons: same keyboard with the plain emoji
       continue;
     }
     if (j && j.ok === false && j.error_code === 400 && JSON.stringify(body?.reply_markup || "").includes("icon_custom_emoji_id")) {
@@ -198,10 +209,28 @@ async function botName(env) {
 }
 
 /* ---------- auto-delete queue (KV "del:<time>:<chat>:<message>") ---------- */
+// KV SAVING: messages are collected in memory and written by flushDeletes() at the END of the update, as ONE key per
+// (30 s slot, chat) that carries all its message ids:  del:<time>:<chat>:<id>.<id>.<id>   (old single-id keys still work)
+const DQ = [];
 async function scheduleDelete(env, chat, mid, ms) {
   if (!KV || !mid) return;
-  const at = String(Date.now() + ms).padStart(14, "0");
-  await KV.put(`del:${at}:${chat}:${mid}`, "1", { expirationTtl: Math.ceil(ms / 1000) + 86400 }).catch(() => {});
+  DQ.push({ at: Date.now() + ms, chat: String(chat), mid: String(mid) });
+}
+async function flushDeletes() {
+  if (!KV || !DQ.length) return;
+  const groups = new Map();
+  for (const it of DQ.splice(0)) {
+    const slot = Math.ceil(it.at / 30000) * 30000, k = slot + ":" + it.chat;
+    if (!groups.has(k)) groups.set(k, { slot, chat: it.chat, ids: [] });
+    groups.get(k).ids.push(it.mid);
+  }
+  const puts = [];
+  for (const g of groups.values())
+    for (let i = 0; i < g.ids.length; i += 20) {
+      const ttl = Math.max(30, Math.ceil((g.slot - Date.now()) / 1000)) + 86400;
+      puts.push(KV.put(`del:${String(g.slot).padStart(14, "0")}:${g.chat}:${g.ids.slice(i, i + 20).join(".")}`, "1", { expirationTtl: ttl }).catch(() => {}));
+    }
+  await Promise.all(puts);
 }
 async function sweep(env) {
   if (!KV) return;
@@ -211,10 +240,10 @@ async function sweep(env) {
     const byChat = new Map(), keys = [];
     let future = false;
     for (const k of l.keys) {                       // keys are sorted by time
-      const [, at, chat, id] = k.name.split(":");
+      const [, at, chat, ids] = k.name.split(":");
       if (Number(at) > now) { future = true; break; }
       if (!byChat.has(chat)) byChat.set(chat, []);
-      byChat.get(chat).push(Number(id));
+      for (const id of String(ids).split(".")) if (id) byChat.get(chat).push(Number(id));
       keys.push(k.name);
     }
     for (const [chat, ids] of byChat)
@@ -320,20 +349,23 @@ async function loadStore(env, force = false) {
    disappears, so optional lines (code, error, character ...) need no special care. Premium emoji: if Telegram refuses them
    (the bot has no extra Fragment username) tg() resends the same card with the plain emoji. */
 const LINE = "━━━━━━━━━━━━━━━━━━";
-const ORDER_BODY = "\n" + LINE + "\n<code>Game   </code> {title}\n<code>Pack   </code> {amount}\n<code>Price  </code> <b>{price} MMK</b>\n" + LINE +
-  "\n<code>ID     </code> <code>{pid}</code>\n<code>Server </code> {serverid}\n<code>Char   </code> {cname}\n<code>Name   </code> <b>{pname}</b>\n" + LINE +
-  "\n<code>Order  </code> <code>{id}</code>\n<code>Via    </code> {via}\n<code>Time   </code> {date}\n<code>By     </code> {byline}\n\n{codeblock}\n\n⚠ {error}";
+const SOFT = "┄┄┄┄┄┄┄┄┄┄┄┄";                                   // thin divider inside the new cards
+// Card design: a bold status header + one-line hint, then two quote blocks (what was bought / who for), then small meta lines.
+// Every line with placeholders disappears when its values are empty, and an empty quote block disappears with it (voucher orders have no ID block).
+const ORDER_BODY = "\n\n<blockquote>\n🎮 <b>{title}</b>\n📦 {amount}\n💰 <b>{price} MMK</b>\n</blockquote>" +
+  "\n\n<blockquote>\n🆔 <code>{pid}</code>\n🖥 {serverid}\n🎭 {cname}\n👤 <b>{pname}</b>\n</blockquote>" +
+  "\n\n🧾 <code>{id}</code>\n🚚 {via}\n🕐 {date}\n🙋 {byline}\n\n{codeblock}\n\n⚠️ {error}";
 const TPL_DEF = {
-  proc: "◌ <b>Order Processing</b>\nလုပ်ဆောင်နေပါတယ်၊ ခဏစောင့်ပါ" + ORDER_BODY,
-  done: "✓ <b>Order Completed</b>\nအောင်မြင်ပါတယ်" + ORDER_BODY,
-  fail: "✗ <b>Order Failed</b>\nမအောင်မြင်ပါ — ငွေမကျသေးပါ" + ORDER_BODY,
-  unk: "! <b>Order Status Unknown</b>\nရလဒ် မသေချာပါ — Provider မှာ ကိုယ်တိုင်စစ်ပါ၊ ထပ်မဝယ်ပါနဲ့" + ORDER_BODY,
-  detail: "🧾 <b>Order စစ်ဆေးရန်</b>\n" + LINE + "\n🎮 {title}\n📦 {amount}\n💰 <b>{price} MMK</b>\n" + LINE +
-    "\n🆔 Player ID  <code>{pid}</code>\n🖥 Server  {serverid}\n👤 Character  {cname}\n✔️ ID Name  <b>{pname}</b>  ✅ စစ်ပြီး\n" + LINE +
-    "\n🚚 {provider}\n\n⚠️ {warn}\n\n⛔ {blocker}\n\n{hint}",
-  quote: "<blockquote>🎮 <b>{title}</b>\n{rows}\n{totalline}</blockquote>",
-  qrow: "{amount}{qtyx} — {pricetag}",
-  ptable: "🎮 {title}\n{label}{part}",
+  proc: "⏳ <b>လုပ်ဆောင်နေပါတယ်</b>\n<i>Provider ဆီက အဖြေကို စောင့်နေပါတယ် — ခဏစောင့်ပါ</i>" + ORDER_BODY,
+  done: "✅ <b>အောင်မြင်ပါပြီ</b>\n<i>Top-up ဝင်သွားပါပြီ</i>" + ORDER_BODY,
+  fail: "❌ <b>မအောင်မြင်ပါ</b>\n<i>ငွေမကျသေးပါ — ပြန်ဝယ်လို့ရပါတယ်</i>" + ORDER_BODY,
+  unk: "⚠️ <b>ရလဒ် မသေချာပါ</b>\n<i>Provider မှာ ကိုယ်တိုင်စစ်ပါ၊ ထပ်မဝယ်ပါနဲ့</i>" + ORDER_BODY,
+  detail: "🧾 <b>Order စစ်ဆေးရန်</b>\n\n<blockquote>\n🎮 <b>{title}</b>\n📦 {amount}\n💰 <b>{price} MMK</b>\n</blockquote>" +
+    "\n\n<blockquote>\n🆔 <code>{pid}</code>\n🖥 {serverid}\n🎭 {cname}\n👤 <b>{pname}</b>  ✅ ID စစ်ပြီး\n</blockquote>" +
+    "\n\n🚚 {provider}\n\n⚠️ {warn}\n\n⛔ {blocker}\n\n{hint}",
+  quote: "<blockquote>\n🎮 <b>{title}</b>\n{rows}\n{totalline}\n</blockquote>",
+  qrow: "{no}{amount}{qtyx} — {pricetag}{unitnote}",
+  ptable: "🎮 {title}\n📂 {label}{part}",
   b_done: "✅ Completed", b_fail: "❌ Failed", b_proc: "⏳ Processing", b_check: "🔄 Status စစ်", b_unk: "⚠️ မသေချာ — Provider မှာစစ်ပါ", b_again: "🛒 ထပ်ဝယ်မယ်",
 };
 const TPL_BTN_KEYS = ["b_done", "b_fail", "b_proc", "b_check", "b_unk", "b_again"];   // plain-text button labels of the order card
@@ -365,7 +397,7 @@ const PH_LIST = {
   proc: PH_ORDER, done: PH_ORDER, fail: PH_ORDER, unk: PH_ORDER,
   detail: [["title", "Game · Server"], ["amount", "Package"], ["price", "ဈေး (MMK)"], ["pid", "Player ID"], ["sid", "Server ID"], ["sname", "Server အမည်"], ["serverid", "Server ID (+ အမည်)"], ["cname", "Character"], ["pname", "ID စစ်ထားတဲ့ နာမည်"], ["provider", "Provider"], ["warn", "သတိပေးချက်"], ["blocker", "မဝယ်နိုင်ရတဲ့ အကြောင်း"], ["hint", "Confirm နှိပ်ရန် အကြံပေးစာ (ဝယ်လို့ရမှ ပေါ်)"]],
   quote: [["title", "Game · Server"], ["game", "Game"], ["server", "Server"], ["rows", "Package စာကြောင်းများ"], ["total", "စုစုပေါင်း (ဂဏန်း)"], ["totalline", "စုစုပေါင်း စာကြောင်း (၂ ခုထက်ပိုမှ ပေါ်)"], ["count", "Package အရေအတွက်"]],
-  qrow: [["amount", "Package"], ["qty", "အရေအတွက်"], ["qtyx", "×အရေအတွက် (၁ ထက်ပိုမှ ပေါ်)"], ["unit", "တစ်ခုဈေး"], ["price", "ဈေး (အရေအတွက်နဲ့ မြှောက်ပြီး)"], ["pricetag", "ဈေး + Ks"]],
+  qrow: [["no", "နံပါတ် (၂ ခုထက်ပိုမှ 1️⃣ 2️⃣ ... / တစ်ခုတည်းဆိုရင် 🏷)"], ["amount", "Package"], ["qty", "အရေအတွက်"], ["qtyx", "×အရေအတွက် (၁ ထက်ပိုမှ ပေါ်)"], ["unit", "တစ်ခုဈေး"], ["price", "ဈေး (အရေအတွက်နဲ့ မြှောက်ပြီး)"], ["pricetag", "ဈေး + Ks"], ["unitnote", "(တစ်ခုဈေး × အရေအတွက်) — ၁ ထက်ပိုမှ ပေါ်"]],
   ptable: [["title", "Game · Server"], ["game", "Game"], ["server", "Server"], ["label", "Tab အမည် (Diamond / Pass ...)"], ["part", "(၁/၂) ပုံစံ — ရှည်ရင်သာ ပေါ်"]],
 };
 for (const k of TPL_BTN_KEYS) PH_LIST[k] = [];
@@ -407,7 +439,7 @@ function tplRender(tpl, vars) {
     if (keys.length && keys.every((k) => !String(vars[k] ?? "").trim()) && balanced(line)) continue;   // nothing to show on this line
     out.push(line.replace(PH_RE, (m, k) => (k in vars ? String(vars[k] ?? "") : m)));
   }
-  const isDiv = (l) => /^[━─═—-]{6,}$/.test(l.trim());       // dividers stay tidy: never doubled, never first or last
+  const isDiv = (l) => /^[━─═—┄┈╌▬-]{6,}$/.test(l.trim());       // dividers stay tidy: never doubled, never first or last
   const tidy = [];
   let prevDiv = true;
   for (const l of out) {
@@ -415,7 +447,8 @@ function tplRender(tpl, vars) {
     else { if (l.trim()) prevDiv = false; tidy.push(l); }
   }
   while (tidy.length && (!tidy[tidy.length - 1].trim() || isDiv(tidy[tidy.length - 1]))) tidy.pop();
-  return tidy.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+<\/blockquote>/g, "</blockquote>").trim();
+  return tidy.join("\n").replace(/(<blockquote(?: expandable)?>)\s*\n+/g, "$1").replace(/\n+<\/blockquote>/g, "</blockquote>")
+    .replace(/<blockquote(?: expandable)?>\s*<\/blockquote>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 function tplOut(key, vars, forceDefault) {               // the card text; a broken / empty / too long custom card falls back to the default one
   let h = "";
@@ -576,7 +609,8 @@ async function onGroupMessage(m, env) {
   if (m.from?.is_bot) return;
   if (!SEEN.has(chat)) {                            // remember the group (the owner picks games per group)
     SEEN.add(chat);
-    await KV.put("grp:" + chat, String(m.chat.title || chat).slice(0, 60)).catch(() => {});
+    const title = String(m.chat.title || chat).slice(0, 60);
+    if ((await KV.get("grp:" + chat).catch(() => null)) !== title) await KV.put("grp:" + chat, title).catch(() => {});   // a read is 100x cheaper than a write
   }
   const text = String(m.text || "").trim();
   const am = text.match(/^\/admin(?:@(\w+))?\s+list$/i);
@@ -663,6 +697,51 @@ const KB = kbOf([[{ text: "🛒 ဝယ်ယူရန်" }], [{ text: "👥 Gro
 const KB_LABELS = new Set(["🛒 ဝယ်ယူရန်", "👥 Group စီမံရန်", "📋 သတ်မှတ်ထားတာများ", "🎨 Card ပြင်ရန်", "🔄 Game list refresh", "📊 ယနေ့ အရောင်း", "ℹ️ အကူအညီ", "📋 Price List"]);
 const KB_ADMIN = kbOf([[{ text: "🛒 ဝယ်ယူရန်" }, { text: "📊 ယနေ့ အရောင်း" }], [{ text: "ℹ️ အကူအညီ" }]]);
 const KB_GROUP = { keyboard: [[{ text: "📋 Price List" }]], resize_keyboard: true, is_persistent: true, input_field_placeholder: "ဈေးကြည့်ရန် Price List ကိုနှိပ်ပါ" };
+/* Premium emoji on the menu (reply) keyboard: the owner sends  /kbicon <premium emoji> <button text>  (e.g. /kbicon 🛒 ဝယ်ယူရန်)  and it is saved in KV "kbi".
+   Telegram then shows that emoji as the button icon and sends only the text when tapped — onPrivate() maps it back to the full label. */
+const kbStrip = (s) => String(s).replace(/^[^\p{L}\p{N}]+/u, "").trim();
+let KBI = {}, KBI_REV = new Map(), KBI_AT = 0;
+async function loadKbi() {
+  if (Date.now() - KBI_AT < 30000) return;
+  KBI_AT = Date.now();
+  try { KBI = (await KV.get("kbi", "json")) || {}; } catch { /* keep the old copy */ }
+  KBI_REV = new Map(Object.keys(KBI).map((k) => [kbStrip(k), k]));
+}
+function kbWithIcons(mk) {
+  if (!mk || !Array.isArray(mk.keyboard) || !Object.keys(KBI).length) return mk;
+  let hit = false;
+  const keyboard = mk.keyboard.map((row) => row.map((b) => {
+    const id = b && typeof b.text === "string" ? KBI[b.text] : null;
+    if (!id) return b;
+    hit = true;
+    return { ...b, text: kbStrip(b.text), icon_custom_emoji_id: id };
+  }));
+  return hit ? { ...mk, keyboard } : mk;
+}
+async function kbIconCommand(env, m, kb) {
+  const chat = m.chat.id, t = String(m.text || "");
+  const body = t.replace(/^\/kbicon(@\w+)?/i, ""), base = t.length - body.length;
+  if (/^\s*reset\s*$/i.test(body)) {
+    await KV.delete("kbi").catch(() => {}); KBI_AT = 0; await loadKbi();
+    return send(env, chat, "✅ Menu icon တွေ ပုံမှန် emoji ပြန်ဖြစ်ပါပြီ", { reply_markup: kb });
+  }
+  const ces = (m.entities || []).filter((e) => e && e.type === "custom_emoji" && e.custom_emoji_id && e.offset >= base).sort((a, b) => a.offset - b.offset);
+  let label = t.slice(base);
+  for (const e of [...ces].sort((a, b) => b.offset - a.offset)) label = label.slice(0, e.offset - base) + label.slice(e.offset - base + e.length);
+  label = kbStrip(label.replace(/\s+/g, " "));
+  const full = [...KB_LABELS].find((x) => kbStrip(x) === label);
+  if (!ces.length || !full) {
+    return send(env, chat, "<b>Menu ခလုတ်မှာ premium emoji ထည့်ရန်</b>\n" + LINE + "\n<code>/kbicon 🛒 ဝယ်ယူရန်</code>\n(🛒 နေရာမှာ premium emoji ထည့်ပါ)\n\nရတဲ့ ခလုတ်များ\n" + [...KB_LABELS].map((x) => "• <code>" + esc(kbStrip(x)) + "</code>").join("\n") + "\n\nပြန်ဖြုတ်ရန် → <code>/kbicon reset</code>", { reply_markup: kb });
+  }
+  const cur = (await KV.get("kbi", "json").catch(() => null)) || {};
+  cur[full] = ces[0].custom_emoji_id;
+  await KV.put("kbi", JSON.stringify(cur)).catch(() => {});
+  KBI_AT = 0; await loadKbi();
+  ICON_REFUSED = false;
+  const r = await send(env, chat, "✅ <b>" + esc(label) + "</b> ခလုတ်မှာ premium emoji ထည့်ပြီးပါပြီ", { reply_markup: kb });
+  if (ICON_REFUSED) await send(env, chat, "⚠️ Telegram က menu ခလုတ်ထဲ premium emoji ကို လက်မခံပါဘူး — ပုံမှန် emoji ပဲ ပေါ်မယ်။ Bot ပိုင်ရှင် account မှာ Telegram Premium ရှိမှ ပေါ်ပါမယ်");
+  return r;
+}
 /* ---------- ℹ️ Guide: a topic menu (buttons), every topic is one short step-by-step page ---------- */
 // callback tags: "h:<topic>" opens a topic, "h:" (empty) = the menu, "hx" closes.  owner: true = Owner only.
 const BATCH_MAX = 10, QTY_MAX = 10, LOWBAL_USD = 10;
@@ -677,14 +756,14 @@ const GUIDE = {
     "📋 <b>Template</b>  <i>(နှိပ်ရင် copy ရ)</i>\n" + LINE + "\n" +
     "<b>ဝယ်</b>\n<code>ml 1159045022 13678 86</code>\n\n<b>အရေအတွက်</b>\n<code>ml 1159045022 13678 86 x3</code>\n\n<b>Package များ</b>\n<code>ml 1159045022 13678 86/172/wp2</code>\n\n" +
     "<b>ID များ</b>\n<code>ml 1159045022 13678 86\n1159045023 13679 wp x2</code>\n\n<b>ID / Package စစ်</b>\n<code>ml 1159045022 13678</code>\n\n<b>ဈေးကြည့်</b>\n<code>86 172 wp</code>\n\n<b>Balance</b>\n≡ menu → 💳 API Balance" },
-  check: { label: "🔎 ID စစ်နည်း", text:
+  check: { label: "🔎 Name စစ်နည်း", text:
     "🔎 <b>ID / Package စစ်နည်း</b>\n" + LINE + "\n" +
     "Package မပါဘဲ ပို့ပါ\n<code>ml 1159045022 13678</code>  သို့  <code>/chk ml 1159045022 13678</code>\n\n" +
-    "Name + <b>ဒီ Bot က ဝယ်ပေးပြီးသား</b> package စာရင်း (ရက်နဲ့) ပြပါမယ်\n✅ ❌ Pass / Double Diamond status ကို Provider မပေးလို့ မပြပါ (STATUS_API ထည့်ရင်ပြမယ်)\n\n" +
-    "<i>တခြားနေရာက ဝယ်ထားတာ မပါပါ — ဒီ Bot မှတ်တမ်းပဲ။</i>" },
+    "<b>Name</b> (ID / Server / Region) ပဲ ပြပါမယ် — Package စာရင်း မပါပါ\nPackage ပါရင် (ဥပမာ <code>ml 1159045022 13678 86</code>) ဝယ်တာဖြစ်ပါမယ်\n\n" +
+    "" },
   quote: { label: "💰 ဈေးပြောနည်း", text:
     "💰 <b>ဈေးပြောနည်း</b>  <i>(Group ထဲ Admin)</i>\n" + LINE + "\n" +
-    "<code>86</code> → ဈေး\n<code>wp 2</code> → wp ၂ ခု (အများဆုံး ၆)\n<code>86 172 wp</code> → အများကြီး + စုစုပေါင်း\n<code>diamond</code> / <code>pass</code> → tab ဇယားအပြည့်\n\nBot ကို private မှာလည်း ပို့ကြည့်လို့ရ\n၅ မိနစ်ကြာရင် auto ပျက်ပါမယ်" },
+    "<code>86</code> → ၈၆ ရဲ့ ဈေးတစ်ခုတည်း ပြ\n<code>wp 2</code> → wp ၂ ခု (အများဆုံး ၆) + စုစုပေါင်း\n<code>86/172/wp</code> သို့ <code>86 172 wp</code> → ရိုက်တဲ့ အစဉ်အတိုင်း နံပါတ်စဉ်နဲ့ ပြပြီး အောက်ဆုံးမှာ <b>စုစုပေါင်း</b>\n<code>86 86 172</code> → ထပ်နေရင် ၈၆ ×၂ လို့ ပေါင်းပေး\n<code>diamond</code> / <code>pass</code> → tab ဇယားအပြည့်\n\nBot ကို private မှာလည်း ပို့ကြည့်လို့ရ\n၅ မိနစ်ကြာရင် auto ပျက်ပါမယ်" },
   result: { label: "📦 Order အခြေအနေ", text:
     "📦 <b>Order အခြေအနေ</b>\n" + LINE + "\n" +
     "◌ <b>Processing</b> — လုပ်ဆောင်နေ (auto ပြင်ပေးမယ်)\n✓ <b>Completed</b> — ပြီးပါပြီ\n✗ <b>Failed</b> — မဝယ်ရ၊ ငွေမကျ\n! <b>Unknown</b> — ရလဒ်မသေချာ\n\n" +
@@ -697,12 +776,27 @@ const GUIDE = {
     `1️⃣ Bot ကို Group ထည့် → Admin လုပ်\n2️⃣ <b>👥 Group စီမံရန်</b> → Group ရွေး\n3️⃣ Game ကို ✅ ပေး/ဖြုတ် (Group တစ်ခုကို ${MAX_GAMES} ခု)\n4️⃣ <b>✅ ပြီးပြီ</b>\n\n📋 <b>သတ်မှတ်ထားတာများ</b> — Group အလိုက် ကြည့်\n🔄 <b>Game list refresh</b> — Store ပြင်ပြီး ချက်ချင်းယူ`, owner: true },
   cards: { label: "🎨 Card ပြင်နည်း", text:
     "🎨 <b>Card ပြင်နည်း</b>  <i>(Owner)</i>\n" + LINE + "\n" +
-    "1️⃣ <b>🎨 Card ပြင်ရန်</b> → Card ရွေး → ✏️ ပြင်မယ်\n2️⃣ စာအသစ်ကို format လုပ်ပြီး ပို့ (message တစ်ခုတည်း)\n3️⃣ <code>{price}</code> <code>{amount}</code> <code>{id}</code> လို placeholder သုံး\n\n⏱ ပြင်ချိန် ၆ နာရီအထိ ရပါတယ် — ❌ ပယ်ဖျက် နှိပ်မှ (သို့) တခြား ခလုတ်နှိပ်မှ ထွက်မယ်\nကျိုးတဲ့ card ဆိုရင် မူလ card ပြန်သုံးမယ်၊ Reset လည်းရ", owner: true },
+    "<b>ပြင်ပုံ</b>\n1️⃣ <b>🎨 Card ပြင်ရန်</b> → ပြင်ချင်တဲ့ card ရွေး\n2️⃣ <b>✏️ ပြင်မယ်</b> နှိပ်\n3️⃣ စာအသစ်ကို <b>message တစ်ခုတည်း</b> နဲ့ ပို့ → bot က preview ပြပြီး အလိုလို သိမ်းမယ်\n\n<b>အခြား ခလုတ်များ</b>\n👁 Preview — နမူနာဒေတာနဲ့ card ကြည့်\n📖 Placeholder — သုံးလို့ရတဲ့ <code>{...}</code> စာရင်း\n📄 HTML code — အခု သုံးနေတဲ့ code ကြည့်\n♻️ Default ပြန်ထား — ပြင်တာ ဖျက်\n\n<b>စည်းမျဉ်း</b>\n• <code>{price}</code> <code>{amount}</code> <code>{pid}</code> လို <code>{...}</code> တွေကို order ရဲ့ တန်ဖိုးနဲ့ bot က အစားထိုးမယ် — ဈေး / ID ကို ကိုယ်တိုင် မရိုက်ပါနဲ့\n• Placeholder ပါတဲ့ စာကြောင်းမှာ တန်ဖိုးမရှိရင် အဲဒီစာကြောင်း ပျောက်မယ် (ဥပမာ Server မလိုရင် <code>{serverid}</code> ကြောင်း) → Placeholder ကို စာကြောင်းတစ်ကြောင်းမှာ တစ်ခုစီ ထား\n• ပြင်ချိန် ၆ နာရီအထိ ရ — ❌ ပယ်ဖျက် (သို့) တခြား ခလုတ်နှိပ်ရင် ထွက်မယ်\n• ကျိုးတဲ့ card ဆိုရင် မူလ card ပြန်သုံးမယ်၊ order မပျက်ဘူး\n• Format (bold, mono, premium emoji) ကို Telegram ထဲမှာ ကိုယ်တိုင်လုပ်ပြီးပို့လည်းရ၊ <code>html:</code> နဲ့ စပြီး code ရေးလည်းရ\n\n📋 အသင့်သုံး Template များကို နောက်စာမျက်နှာ ၂ ခုမှာ ကြည့်ပါ (Template ၁ / ၂) — နှိပ်ရင် copy ရပြီး ပို့ရုံပဲ", owner: true },
+  cardA: { label: "🎨 Template ၁ (Order card)", text:
+    "🎨 <b>Template ၁ — Order card</b>  <i>(နှိပ်ရင် copy)</i>\n" + LINE + "\n" +
+    "<i>အခု default က ဒီပုံစံပါ — Status ခေါင်းစီး + quote block ၂ ခု (ဝယ်တာ / ID)</i>\n\n" +
+    "<b>⏳ လုပ်ဆောင်နေ</b>\n<pre>html:⏳ &lt;b&gt;လုပ်ဆောင်နေပါတယ်&lt;/b&gt;\n&lt;blockquote&gt;\n🎮 &lt;b&gt;{title}&lt;/b&gt;\n📦 {amount}\n&lt;/blockquote&gt;\n🆔 &lt;code&gt;{pid}&lt;/code&gt;\n🖥 {serverid}</pre>\n" +
+    "<b>✅ ပြီးစီး</b>\n<pre>html:✅ &lt;b&gt;အောင်မြင်ပါပြီ&lt;/b&gt;\n&lt;blockquote&gt;\n🎮 &lt;b&gt;{title}&lt;/b&gt;\n📦 {amount}\n💰 &lt;b&gt;{price} MMK&lt;/b&gt;\n&lt;/blockquote&gt;\n🆔 &lt;code&gt;{pid}&lt;/code&gt;\n🖥 {serverid}\n👤 {pname}\n\n{codeblock}</pre>\n" +
+    "<b>❌ မအောင်မြင်</b>\n<pre>html:❌ &lt;b&gt;မအောင်မြင်ပါ&lt;/b&gt; — ငွေမကျသေးပါ\n🎮 {title}\n📦 {amount}\n🆔 &lt;code&gt;{pid}&lt;/code&gt;\n⚠️ {error}</pre>\n" +
+    "<b>⚠️ မသေချာ</b>\n<pre>html:⚠️ &lt;b&gt;ရလဒ် မသေချာပါ&lt;/b&gt;\nProvider မှာ စစ်ပါ၊ ထပ်မဝယ်ပါနဲ့\n🎮 {title}\n📦 {amount}\n🆔 &lt;code&gt;{pid}&lt;/code&gt;\n⚠️ {error}</pre>\n" +
+    "⚠️ <b>မဖျက်ရ</b>\n• ✅ ပြီးစီး card ထဲက <code>{codeblock}</code> — Voucher Code ပေါ်ဖို့\n• ❌ / ⚠️ card ထဲက <code>{error}</code> — အကြောင်းရင်း ပေါ်ဖို့\n• 🧾 Order စစ်ဆေးရန် card (<code>{pname}</code> <code>{blocker}</code> <code>{hint}</code>) ကို မပြင်တာ အကောင်းဆုံး\n• API Balance နည်းတဲ့ ⚠ သတိပေးချက်ကို bot က card အောက်မှာ ကိုယ်တိုင်ထည့်ပေးတယ်", owner: true },
+  cardB: { label: "🎨 Template ၂ (ဈေး / ခလုတ်)", text:
+    "🎨 <b>Template ၂ — ဈေး card / ခလုတ်</b>  <i>(နှိပ်ရင် copy)</i>\n" + LINE + "\n" +
+    "<b>💬 Quote card</b> <i>(Group မှာ <code>86 172 wp</code> ရိုက်ရင်)</i>\n<pre>html:&lt;blockquote&gt;\n🎮 &lt;b&gt;{title}&lt;/b&gt;\n{rows}\n{totalline}\n&lt;/blockquote&gt;</pre>\n" +
+    "<b>📝 Quote စာကြောင်း</b> <i>(Package တစ်ခုချင်း)</i>\n<pre>html:{no}{amount}{qtyx} — {pricetag}</pre>\n" +
+    "<b>📊 ဇယား ခေါင်းစီး</b>\n<pre>html:🎮 {title}\n📂 {label}{part}</pre>\n" +
+    "<i>ခေါင်းစီးမှာ format ထည့်ရင် ခေါင်းစီးကို ဇယားအပေါ်မှာ သီးခြား message ခွဲပို့မယ်</i>\n\n" +
+    "<b>🔘 ခလုတ်စာသား</b>\nပြင်ချင်တဲ့ ခလုတ်ကို <b>🔘 ခလုတ်စာသားများ</b> ထဲက ရွေး → စာကို <b>တစ်ကြောင်းတည်း၊ ၄၀ လုံးအထိ</b> ပို့\nဥပမာ — <code>✅ ပြီးပါပြီ</code> · <code>❌ မအောင်မြင်</code> · <code>⏳ လုပ်နေဆဲ</code> · <code>🔄 ပြန်စစ်</code> · <code>🛒 ထပ်ဝယ်</code>\nPremium emoji ကို တစ်ခုပဲ ထည့်လို့ရ (ခလုတ်ဘယ်စွန်းမှာ ပေါ်) — Bot ပိုင်ရှင် account မှာ Telegram Premium ရှိမှ ပေါ်မယ်", owner: true },
   fix: { label: "🛠 ပြဿနာ", text:
     "🛠 <b>ပြဿနာဖြေရှင်းရန်</b>\n" + LINE + "\n" +
     "<b>✗ မဝယ်ရသေးပါ</b> → card ထဲက စာကြောင်းကို ပြင်ပြီး ပြန်ပို့ (ဘာမှ မဖြတ်ရသေး)\n<b>အတိုကောက် မမှန်</b> → Owner <code>/abbr</code>\n<b>ID စစ်မရ</b> → ခဏနေ ပြန်ပို့\n<b>List မပေါ်</b> → Bot ကို Group Admin လုပ် · 👥 Group စီမံရန်မှာ Game သတ်မှတ်\n<b>Admin ခလုတ် မရ</b> → Bot ကို private မှာ Start နှိပ်\n<b>Store data မရ</b> → 🔄 Game list refresh\n\nကိုယ့် ID → private မှာ <code>/id</code>", owner: true },
 };
-const GUIDE_ORDER = ["buy", "tpl", "check", "quote", "result", "member", "group", "cards", "fix"];
+const GUIDE_ORDER = ["buy", "tpl", "check", "quote", "result", "member", "group", "cards", "cardA", "cardB", "fix"];
 function guideView(topic, owner) {
   const ok = (k) => GUIDE[k] && (owner || !GUIDE[k].owner);
   const close = btn("❌ ပိတ်", "hx", "danger");
@@ -1268,12 +1362,16 @@ async function sendBalance(env, chat) {
   const b = await g2Balance(env);
   return send(env, chat, b === null ? "<b>API Balance</b> မရနိုင်ပါ — G2BULK_KEY စစ်ပါ" : `<b>API Balance</b>  <code>${b.toFixed(2)} USD</code>` + (b < LOWBAL_USD ? `\n⚠ ${LOWBAL_USD} USD အောက်ရောက်နေပါပြီ — ဖြည့်ပါ` : ""));
 }
+let BAL_MEM = null;
 async function watchBalance(env) {                       // low balance (once) and \"Successfully Deposit\" -> owners / LOG_CHAT_ID
   if (!KV || !env.G2BULK_KEY) return;
   const b = await g2Balance(env);
   if (b === null) return;
-  const prev = await KV.get("bal:g2", "json").catch(() => null);
-  await KV.put("bal:g2", JSON.stringify({ v: b, t: Date.now() })).catch(() => {});
+  const saved = await KV.get("bal:g2", "json").catch(() => null);
+  const prev = BAL_MEM && (!saved || BAL_MEM.t > saved.t) ? BAL_MEM : saved;
+  BAL_MEM = { v: b, t: Date.now() };
+  // KV SAVING: before, this was a KV write every 5 min (288 a day).  Now only for a change of 0.5 USD or more (a deposit is always >= 1), or every 6 h.
+  if (!saved || Math.abs(b - saved.v) >= 0.5 || Date.now() - saved.t > 6 * 3600 * 1000) await KV.put("bal:g2", JSON.stringify({ v: b, t: Date.now() })).catch(() => {});
   const to = new Set([...idList(env.OWNER_IDS), ...idList(env.LOG_CHAT_ID)]);
   const tell = async (text) => { for (const id of to) await send(env, id, text).catch(() => {}); };
   const min = Number(env.DEPOSIT_MIN_USD) > 0 ? Number(env.DEPOSIT_MIN_USD) : 1;
@@ -1286,20 +1384,41 @@ async function watchBalance(env) {                       // low balance (once) a
     await tell(`<b>⚠ API Balance နည်းနေပါပြီ</b>\n${LINE}\n<code>Balance </code> <b>${b.toFixed(2)} USD</b>\n<code>Limit   </code> ${LOWBAL_USD} USD\nအမြန်ဖြည့်ပါ`);
   } else if (b >= LOWBAL_USD && low) await KV.delete("bal:low").catch(() => {});
 }
+/* ----- ×N (quantity) — ONE reader for orders; the quote reader (quoteItems) follows the same rules -----
+   86x2 · 86 x2 · 86 x 2 · 86×2 · 86*2 · 86X2   quantity AFTER the package
+   x2 86 · 2x86                                  quantity BEFORE it (a small number in front of a big one: 2x86 = 2 × "86")
+   wp2 · wp 2 · wpx2 · wp x2                     a letter package with its quantity
+   86/86 · 86 86 · 86x2/86                        same package again = added up
+   Anything above QTY_MAX is not guessed: the order is refused with a clear line instead. */
+function takeQty(s) {                                    // "86x2" -> { rest: "86", qty: 2 }
+  s = String(s).toLowerCase().replace(/[×✕✖*]/g, "x").replace(/\s+/g, " ").trim();
+  let m = s.match(/^(.*?\S)\s*x\s*(\d{1,3})$/);
+  if (m) {
+    let rest = m[1], qty = Number(m[2]);
+    if (qty > QTY_MAX) {                                 // "2x86": the small number in front is the quantity, the big one is the package
+      const p = rest.match(/(?:^|\s)(\d{1,2})$/);
+      if (p && Number(p[1]) >= 1 && Number(p[1]) <= QTY_MAX) { rest = (rest.slice(0, p.index) + " " + m[2]).trim(); qty = Number(p[1]); }
+    }
+    return { rest, qty };
+  }
+  m = s.match(/^x\s*(\d{1,3})\s+(\S.*)$/);               // "x2 86"
+  if (m) return { rest: m[2], qty: Number(m[1]) };
+  return { rest: s, qty: 1 };
+}
 function parseBuyLine(line, aliases, prev) {             // -> { g, pid, segs:[{tk,qty}] } | null (not an order)
-  let t = String(line).toLowerCase().replace(/[×*]/g, "x").trim();
+  let t = String(line).toLowerCase().replace(/[×✕✖*]/g, "x").trim();
   t = t.replace(/(\d{1,4})\s*\+\s*(?:\d{1,4})?(?=\s|$|&|\/|x\d)/g, "$1 dd");   // "50+" (double diamond) -> "50 dd"
   const m = t.match(/^([\p{L}\p{N}_.-]+)\s+([\s\S]+)$/u);
   let g;
   if (m && aliases.has(m[1])) { g = aliases.get(m[1]); t = m[2]; } else if (prev) g = prev; else return null;
   const segs = t.split(/\s*[&\/]\s*/).map((x) => {        // packages are separated by "/" (or "&")
-    let qty = 1; const q = x.match(/\s*x\s*(\d{1,3})\s*$/);
-    if (q) { qty = Number(q[1]); x = x.slice(0, q.index); }
-    const tk = x.split(Q_SPLIT).filter(Boolean), n = tk.length;
-    if (qty === 1 && n) {                                  // "wp2" / "wp 2" = 2 weekly passes
+    const r = takeQty(x);
+    let qty = r.qty;
+    const tk = r.rest.split(Q_SPLIT).filter(Boolean), n = tk.length;
+    if (n) {                                               // "wp2" / "wp 2" = 2 weekly passes  (with x: "wp2x3" = 6)
       const g = tk[n - 1].match(/^([a-z]{2,6})(\d{1,2})$/);
-      if (g && g[1] !== "dd") { tk[n - 1] = g[1]; qty = Number(g[2]); }
-      else if (n >= 2 && /^\d{1,2}$/.test(tk[n - 1]) && /^[a-z]{2,6}$/.test(tk[n - 2]) && tk[n - 2] !== "dd") { qty = Number(tk.pop()); }
+      if (g && g[1] !== "dd") { tk[n - 1] = g[1]; qty *= Number(g[2]); }
+      else if (n >= 2 && /^\d{1,2}$/.test(tk[n - 1]) && /^[a-z]{2,6}$/.test(tk[n - 2]) && tk[n - 2] !== "dd") { qty *= Number(tk.pop()); }
     }
     return { tk, qty };
   });
@@ -1308,6 +1427,28 @@ function parseBuyLine(line, aliases, prev) {             // -> { g, pid, segs:[{
   const pid = segs[0].tk[i];
   segs[0].tk = segs[0].tk.filter((_, j) => j !== i);
   return { g, pid, segs };
+}
+function multiHits(g, pid, rest) {                       // "86 172 wp" -> one hit per word; every word must match exactly ONE package, else null
+  const srv = g.entries.some((e) => reqOf(e).needsServer) && rest.length > 1 && /^\d+$/.test(rest[0]) ? rest[0] : "";
+  const words = srv ? rest.slice(1) : rest;
+  if (words.length < 2) return null;
+  const out = [];
+  for (const w of words) {
+    const h = quickMatches([g], { id: pid, rest: srv ? [srv, w] : [w] });
+    if (h.length !== 1) return null;
+    out.push(h[0]);
+  }
+  return out;
+}
+function batchLines(units) {                              // the batch card lists WHAT is being bought:  86 Diamonds ×2 — 10,400 Ks
+  const by = new Map();
+  for (const u of units) {
+    const k = u.group.id + "|" + u.entry.id + "|" + u.entry.packages.indexOf(u.pkg);
+    if (!by.has(k)) by.set(k, { game: u.group.name, server: u.entry.server, amount: String(u.pkg.amount ?? "-"), n: 0, sum: 0 });
+    const v = by.get(k); v.n++; v.sum += Number(u.pkg.price) || 0;
+  }
+  const rows = [...by.values()].slice(0, 12).map((v) => `🎮 ${esc(v.game)}${v.server ? " · " + esc(v.server) : ""}\n    ${esc(v.amount)}${v.n > 1 ? ` <b>×${v.n}</b>` : ""} — <code>${fmt(v.sum)}</code> Ks`);
+  return rows.join("\n") + (by.size > 12 ? `\n… +${by.size - 12}` : "");
 }
 async function autoBuy(env, m, inGroup) {                // true = the message was an order (bought or refused with a reason)
   const uid = m.from?.id, chat = m.chat.id, text = String(m.text || "").trim();
@@ -1320,9 +1461,12 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
   const lines = text.split(/\n+/).map((x) => x.trim()).filter(Boolean);
   const first = parseBuyLine(lines[0], aliases, null);
   if (!first) return false;                              // no abbreviation / no ID: not an order
-  if (lines.length === 1 && first.segs.length === 1 && first.segs[0].qty === 1) {      // "abbr ID [server]" with no package = status check, nothing is bought
+  if (lines.length === 1 && first.segs.length === 1 && first.segs[0].qty === 1) {      // "abbr ID [server]" with no package = name check, nothing is bought
     const r0 = first.segs[0].tk;
-    if (!r0.length || (r0.length === 1 && /^\d{2,7}$/.test(r0[0]) && !quickMatches([first.g], { id: first.pid, rest: r0 }).length)) return statusCard(env, m, inGroup, first.g, first.pid, r0[0] || "");
+    const e0 = first.g.entries.find((e) => e.f.idCheck) || first.g.entries[0];
+    const isNum = r0.length === 1 && /^\d{2,7}$/.test(r0[0]);
+    // a game that needs a server: "ID + one number" is always ID + Server (an order would need server AND package), even if the number equals a package amount
+    if (!r0.length || (isNum && (reqOf(e0).needsServer || !quickMatches([first.g], { id: first.pid, rest: r0 }).length))) return statusCard(env, m, inGroup, first.g, first.pid, r0[0] || "");
   }
   const dk = "bt:" + chat + ":" + m.message_id;          // Telegram re-delivering the same message must never buy twice
   if (await KV.get(dk).catch(() => null)) return true;
@@ -1341,20 +1485,23 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
       if (sg.qty < 1 || sg.qty > QTY_MAX) { fail(ln, `အရေအတွက် 1–${QTY_MAX} ပဲ ရပါမယ်`); continue; }
       const rest = k === 0 ? sg.tk : sid ? [sid, ...sg.tk] : sg.tk;
       if (!rest.length) { fail(ln, "Package မပါပါ"); continue; }
-      const hits = quickMatches([p.g], { id: p.pid, rest });
-      if (hits.length !== 1) { fail(ln, hits.length ? `Package ${hits.length} ခု ကိုက်နေ — ပိုတိကျအောင် ရေးပါ (သို့ 🛒 ခလုတ်သုံးပါ)` : "Package မတွေ့ပါ — ရတာ: " + [...new Set(p.g.entries.flatMap((e) => e.packages.map((x) => String(x.amount ?? "")).filter(Boolean)))].slice(0, 14).join(" · ")); continue; }
-      const h = hits[0], entry = h.group.entries[h.ei], pkg = entry.packages[h.pi], rq = reqOf(entry), pv = providerOf(entry, pkg);
-      if (k === 0) sid = h.sid;
-      if (!pv.ok || !keyReady(env, pv)) { fail(ln, pv.why || "Provider key မထည့်ရသေးပါ"); continue; }
-      if (rq.needsChar) { fail(ln, "Character Name လိုတဲ့ game — 🛒 ခလုတ်နဲ့ ဝယ်ပါ"); continue; }
-      let s = h.sid, sname = "";
-      if (rq.needsServer) {
-        if (!s) { fail(ln, "Server ID မပါပါ"); continue; }
-        const opts = await resolveServers(entry);
-        if (opts.length) { const o = opts.find((x) => String(x.value) === s); if (!o) { fail(ln, "Server ID မကိုက်ပါ"); continue; } sname = o.label; }
-      } else s = "";
-      const u = { line: ln, group: p.g, entry, pkg, pv, pid: p.pid, sid: s, sname, pname: "" };
-      for (let n = 0; n < sg.qty; n++) units.push(u);
+      const base = quickMatches([p.g], { id: p.pid, rest });
+      const hl = base.length === 1 ? base : base.length ? null : multiHits(p.g, p.pid, rest);   // "86 172 wp" typed with spaces = three packages
+      if (!hl) { fail(ln, base.length ? `Package ${base.length} ခု ကိုက်နေ — ပိုတိကျအောင် ရေးပါ (သို့ 🛒 ခလုတ်သုံးပါ)` : "Package မတွေ့ပါ — ရတာ: " + [...new Set(p.g.entries.flatMap((e) => e.packages.map((x) => String(x.amount ?? "")).filter(Boolean)))].slice(0, 14).join(" · ")); continue; }
+      if (k === 0) sid = hl[0].sid;
+      for (const h of hl) {
+        const entry = h.group.entries[h.ei], pkg = entry.packages[h.pi], rq = reqOf(entry), pv = providerOf(entry, pkg);
+        if (!pv.ok || !keyReady(env, pv)) { fail(ln, pv.why || "Provider key မထည့်ရသေးပါ"); continue; }
+        if (rq.needsChar) { fail(ln, "Character Name လိုတဲ့ game — 🛒 ခလုတ်နဲ့ ဝယ်ပါ"); continue; }
+        let s = h.sid, sname = "";
+        if (rq.needsServer) {
+          if (!s) { fail(ln, "Server ID မပါပါ"); continue; }
+          const opts = await resolveServers(entry);
+          if (opts.length) { const o = opts.find((x) => String(x.value) === s); if (!o) { fail(ln, "Server ID မကိုက်ပါ"); continue; } sname = o.label; }
+        } else s = "";
+        const u = { line: ln, group: p.g, entry, pkg, pv, pid: p.pid, sid: s, sname, pname: "" };
+        for (let n = 0; n < sg.qty; n++) units.push(u);
+      }
     }
   }
   if (units.length > BATCH_MAX) fail("-", `Order စုစုပေါင်း ${units.length} ခု — ${BATCH_MAX} ခုထိပဲ ရပါမယ်`);
@@ -1382,7 +1529,8 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
   const bal = units.some((u) => /^(g2bulk|voucher)$/.test(u.pv.key)) ? await g2Balance(env) : null;
   if (bal !== null && bal <= 0) { await send(env, chat, `<b>✗ မဝယ်ရသေးပါ</b>\nAPI Balance မရှိတော့ပါ (<code>${bal.toFixed(2)} USD</code>) — အရင်ဖြည့်ပါ`, rt); return true; }
   const f = m.from, by = [f.first_name, f.last_name].filter(Boolean).join(" ") || f.username || String(uid);
-  const head = units.length > 1 ? await send(env, chat, `<b>Batch</b>  ${units.length} orders\n${LINE}\n<code>Total  </code> <b>${fmt(units.reduce((n, u) => n + (Number(u.pkg.price) || 0), 0))} MMK</b>`, rt) : null;
+  const bl = units.length > 1 ? batchLines(units) : "";
+  const head = units.length > 1 ? await send(env, chat, `<b>Batch</b>  ${units.length} orders\n${LINE}\n${bl}\n${LINE}\n<code>Total  </code> <b>${fmt(units.reduce((n, u) => n + (Number(u.pkg.price) || 0), 0))} MMK</b>`, rt) : null;
   const list = [];
   for (let i = 0; i < units.length; i++) {
     const u = units[i];
@@ -1408,7 +1556,7 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
     const n = (st) => list.filter(({ o }) => o.status === st).length, done = n("completed"), bad = n("failed"), unk = n("unknown"), open = list.length - done - bad - unk;
     const paid = list.filter(({ o }) => o.status !== "failed").reduce((t, { o }) => t + (Number(o.price) || 0), 0);
     const rows = [`<code>Done   </code> ✓ ${done}`, open ? `<code>Open   </code> ◌ ${open}` : "", bad ? `<code>Failed </code> ✗ ${bad}` : "", unk ? `<code>Unknown</code> ! ${unk}` : ""].filter(Boolean);
-    await tg(env, "editMessageText", { chat_id: chat, message_id: head.result.message_id, parse_mode: "HTML", text: `<b>Batch</b>  ${units.length} orders\n${LINE}\n${rows.join("\n")}\n${LINE}\n<code>Total  </code> <b>${fmt(paid)} MMK</b>` }).catch(() => {});
+    await tg(env, "editMessageText", { chat_id: chat, message_id: head.result.message_id, parse_mode: "HTML", text: `<b>Batch</b>  ${units.length} orders\n${LINE}\n${bl}\n${LINE}\n${rows.join("\n")}\n${LINE}\n<code>Total  </code> <b>${fmt(paid)} MMK</b>` }).catch(() => {});
   }
   await watchBalance(env).catch(() => {});               // balance moved: low-balance alert / deposit check at once
   return true;
@@ -1473,30 +1621,10 @@ async function statusCard(env, m, inGroup, g, pid, sidArg) {   // always true: t
   if (r.outcome === "invalid") { await out(r.reason === "server" ? "<b>Server ID မကိုက်ပါ</b>" : "<b>ဒီ Player ID ကို မတွေ့ပါ</b>"); return true; }
   if (r.outcome !== "valid") { await out("<b>ID စစ်မရပါ</b> — ခဏနေ ပြန်ပို့ပါ"); return true; }
   const flats = await statusData(env, entry, pid, sid, r.raw);
-  const hist = ((await KV.get("ph:" + pid + ":" + sid, "json").catch(() => null)) || {})[g.name] || {};
-  const dd = [], pb = [];
-  for (const tab of tabsOf(entry)) { const nm = tab.label + " " + tab.key; if (/double|2x/i.test(nm)) dd.push(tab); else if (/pass|bundle|package|weekly|monthly|elite|epic/i.test(nm)) pb.push(tab); }
-  let known = 0;
-  const mark = (label, hint, isDd) => {
-    const clean = String(label).replace(/\s*[🔥⭐]\s*$/u, "");
-    let f = flagFor(clean, flats, hint);
-    if (f !== null) known++;                                  // only what a provider really said counts
-    if (f === null && isDd && hist[clean]) f = false;
-    return f === true ? "✅" : f === false ? "❌" : "➖";
-  };
-  const secPb = pb.flatMap((t) => t.rows.map((x) => x[0])).slice(0, 12).map((l) => `${mark(l, null, false)} ${esc(String(l).replace(/\s*[🔥⭐]\s*$/u, ""))}`);
-  const secDd = dd.flatMap((t) => t.rows.map((x) => x[0])).slice(0, 12).map((l) => `${esc(String(l).replace(/\s*[🔥⭐]\s*$/u, "").replace(/\s*diamonds?$/i, ""))} ${mark(l, /double|first|2x/i, true)}`);
   const name = r.name || pickStr(flats, /^(name|nickname|nick|role_?name|username)$/i), region = pickStr(flats, /^(region|country|country_?name)$/i);
   const L = LINE;
-  let text = `🎮 <b>${esc(g.name)}${entry.server ? " · " + esc(entry.server) : ""}</b>\n${L}\n<code>ID     </code> <code>${esc(pid)}</code>\n` + (sid ? `<code>Server </code> <code>${esc(sid)}</code>\n` : "") + `<code>Name   </code> <b>${esc(name || "-")}</b>\n` + (region ? `<code>Region </code> ${esc(region)}\n` : "");
-  if (known) {                                          // a provider / STATUS_API told us: show the tiers
-    if (secPb.length) text += `${L}\n<b>Pass &amp; Bundle</b>\n${secPb.join("\n")}\n`;
-    if (secDd.length) text += `${L}\n<b>Double Diamonds</b>\n${secDd.join("  ·  ")}\n`;
-    text += `${L}\n✅ ဝယ်လို့ရ · ❌ မရ/သုံးပြီး · ➖ မသိ`;
-  } else {                                              // nobody tells: only show what THIS bot delivered (no guessing)
-    const hs = Object.entries(hist).sort((x, y) => y[1] - x[1]).slice(0, 12);
-    text += `${L}\n<b>ဒီ Bot က ဝယ်ပေးပြီးသား</b>\n` + (hs.length ? hs.map(([am, t]) => `✓ ${esc(am)} · ${esc(dateMM(t))}`).join("\n") : "<i>မရှိသေးပါ</i>");
-  }
+  // ID only = NAME CHECK: Game · ID · Server · Name · Region. No package / pass / double-diamond lists (those belong to an order, which has packages in the message).
+  const text = `🎮 <b>${esc(g.name)}${entry.server ? " · " + esc(entry.server) : ""}</b>\n${L}\n<code>ID     </code> <code>${esc(pid)}</code>\n` + (sid ? `<code>Server </code> <code>${esc(sid)}</code>\n` : "") + `<code>Name   </code> <b>${esc(name || "-")}</b>\n` + (region ? `<code>Region </code> ${esc(region)}\n` : "");
   const copy = [{ text: "📋 ID Copy", copy_text: { text: String(pid) } }];
   if (sid) copy.push({ text: "📋 Server Copy", copy_text: { text: String(sid) } });
   await out(text, { reply_markup: { inline_keyboard: [copy] } });
@@ -1509,7 +1637,8 @@ async function chkParse(env, m, inGroup, body) {         // "ml 1159045022 13678
   if (inGroup) { const al = await getAllowed(m.chat.id); pool = pool.filter((x) => al.includes(x.key)); }
   const p = parseBuyLine(body, await abbrMap({ groups: pool }), null);
   if (!p) return { err: "ပုံစံ — <code>/chk ml 1159045022 13678</code>" };
-  return { g: p.g, pid: p.pid, sid: (p.segs[0].tk.find((x) => /^\d{2,7}$/.test(x))) || "" };
+  const e0 = p.g.entries.find((e) => e.f.idCheck) || p.g.entries[0];     // a game without a server ignores any package typed after the ID: /chk is a name check only
+  return { g: p.g, pid: p.pid, sid: reqOf(e0).needsServer ? (p.segs[0].tk.find((x) => /^\d{2,7}$/.test(x)) || "") : "" };
 }
 async function chkCommand(env, m, inGroup) {
   const body = String(m.text || "").replace(/^\/chk(@\w+)?\s*/i, "").trim();
@@ -1545,12 +1674,12 @@ async function groupAdminText(env, m) {                 // admin REPLIES to the 
 
 /* ----- admin price quote in a group: type amounts / package names (86, wp, wp 2, 86 172 wp) or a tab name (diamond, pass) ----- */
 const QUOTE_MS = 5 * 60 * 1000;                         // quotes disappear after 5 minutes
-const MAX_QTY = 6;
+const MAX_QTY = QTY_MAX;                                // one limit for quotes and orders
 const Q_STOP = /ဈေးနှုန်း|ဈေး|ဘယ်လောက်|ကျပ်|ပေးပါ|ပေး|လဲ|လား|\b(?:price|prices|rate|mmk|ks|kyat|pls|please)\b/gi;
 const isFiller = (x) => x !== "x" && Q_FILLER.has(x);
 function quoteTokens(text, forTab) {
   let s = String(text || "").toLowerCase().replace(Q_STOP, " ");
-  if (!forTab) s = s.replace(/weekly\s*diamond\s*pass|weekly\s*pass|\bwkp\b/g, "wp").replace(/(^|[^\d])([1-6])wp\b/g, "$1wp x $2").replace(/[×*]/g, " x ");
+  if (!forTab) s = s.replace(/weekly\s*diamond\s*pass|weekly\s*pass|\bwkp\b/g, "wp").replace(/(^|[^\d])([1-9]|10)wp\b/g, "$1wp x $2").replace(/[×✕✖*]/g, " x ").replace(/([a-z]{2,})x(?=\d)/g, "$1 x ");   // "wpx2" -> "wp x 2"
   s = s.replace(/(\d)([a-z])/g, "$1 $2").replace(/([a-z])(\d)/g, "$1 $2");
   return s.split(Q_SPLIT).filter(Boolean);
 }
@@ -1570,21 +1699,25 @@ function tabMatches(pool, text) {                       // the whole message is 
   const seen = new Set();
   return (exact.length ? exact : loose).filter((h) => { const k = h.group.id + "|" + h.entry.id + "|" + h.tab.key; if (seen.has(k)) return false; seen.add(k); return true; });
 }
-function quoteItems(text) {                             // "86 172 wp 2 x3" -> [{86},{172},{wp qty 2}]
+function quoteItems(text) {                             // "86 172 wp 2 x3" -> [{86},{172},{wp qty 2}]   (same ×N rules as takeQty: 86x2 · x2 86 · 2x86 · wpx2)
   const tk = quoteTokens(text, false).filter((x) => !isFiller(x));
   const items = [];
+  let pend = 0;                                          // a quantity typed BEFORE its package ("x2 86" / "2x86") waits for the next one
+  const cap = (it, n) => { it.over = n > MAX_QTY; it.qty = Math.min(Math.max(1, n), MAX_QTY); };
+  const put = (it) => { if (pend) { cap(it, pend); pend = 0; } items.push(it); };
   for (let i = 0; i < tk.length; i++) {
     const t = tk[i], last = items[items.length - 1];
     if (t === "x") {
-      if (last && /^\d+$/.test(tk[i + 1] || "")) { const n = Number(tk[++i]); last.over = n > MAX_QTY; last.qty = Math.min(Math.max(1, n), MAX_QTY); }
+      if (/^\d+$/.test(tk[i + 1] || "")) { const n = Number(tk[++i]); if (last) cap(last, n); else pend = n; }
       continue;
     }
     if (/^\d+$/.test(t)) {
       const n = Number(t);
+      if (n >= 1 && n <= MAX_QTY && tk[i + 1] === "x" && /^\d+$/.test(tk[i + 2] || "") && Number(tk[i + 2]) > MAX_QTY) { pend = n; i++; continue; }   // "2x86" = 2 × 86
       if (last && !last.num && !last.qty && n >= 1 && n <= MAX_QTY) { last.qty = n; continue; }   // "wp 2" = 2 weekly passes
-      items.push({ toks: [t], num: true, qty: 0, text: t });
+      put({ toks: [t], num: true, qty: 0, text: t });
     } else if (last && !last.num && !last.qty) { last.toks.push(t); last.text += " " + t; }          // "twilight pass" = one name
-    else items.push({ toks: [t], num: false, qty: 0, text });
+    else put({ toks: [t], num: false, qty: 0, text });
   }
   items.forEach((it) => { if (!it.num) it.text = it.toks.join(" "); });
   return items;
@@ -1610,35 +1743,43 @@ function resolveItem(pool, it) {
 }
 function quoteHtml(pool, items) {
   const sections = new Map(), warn = [];
-  for (const it of items) {
+  for (const it of items) {                             // items stay in the order the admin typed them
     const r = resolveItem(pool, it);
     if (!r) { warn.push(it); continue; }
     for (const h of r) {
       const k = h.group.id + "|" + h.ei;
       if (!sections.has(k)) sections.set(k, { group: h.group, entry: h.group.entries[h.ei], lines: [] });
-      sections.get(k).lines.push({ p: h.group.entries[h.ei].packages[h.pi], qty: it.qty || 1 });
+      const sec = sections.get(k), p = h.group.entries[h.ei].packages[h.pi];
+      const same = sec.lines.find((l) => l.p === p);    // "86 86 172" -> 86 ×2, 172  (stays at its first position)
+      if (same) same.qty += it.qty || 1; else sec.lines.push({ p, qty: it.qty || 1 });
     }
   }
   const html = [...sections.values()].map((sec) => quoteSection(sec.group.name, sec.entry.server, sec.lines.map(({ p, qty }) => {
     const unit = Number(p.price), ok = p.price !== undefined && p.price !== null && p.price !== "" && Number.isFinite(unit);
     return { amount: String(p.amount ?? "-"), qty, unit: ok ? unit : null };      // the price is always the store's current price
   })));
-  return { html: html.join("\n"), warn, found: sections.size };
+  return { html: html.join("\n\n"), warn, found: sections.size };
 }
+const KEYCAP = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
 function quoteSection(game, server, lines) {              // one game's quote card from the "quote" + "qrow" templates
+  // ONE package  -> just its price.   SEVERAL packages -> numbered in the order they were typed, then the total underneath.
   let total = 0, priced = true;
-  const rows = lines.map(({ amount, qty, unit }) => {
+  const multi = lines.length > 1;
+  const rows = lines.map(({ amount, qty, unit }, i) => {
     const ok = unit !== null && unit !== undefined;
     if (ok) total += unit * qty; else priced = false;
     return tplOut("qrow", {
+      no: multi ? (KEYCAP[i] || `${i + 1}.`) + " " : "🏷 ",
       amount: esc(amount), qty: qty > 1 ? String(qty) : "", qtyx: qty > 1 ? ` ×${qty}` : "",
       unit: ok ? fmt(unit) : "-", price: ok ? fmt(unit * qty) : "-", pricetag: ok ? `<code>${fmt(unit * qty)}</code> Ks` : "-",
+      unitnote: ok && qty > 1 ? ` <i>(${fmt(unit)} × ${qty})</i>` : "",         // "10,400 Ks (5,200 × 2)" — the single price stays visible
     });
   });
+  const showTotal = multi || lines.some((l) => l.qty > 1);
   return tplOut("quote", {
     game: esc(game), server: esc(server || ""), title: esc(game) + (server ? " · " + esc(server) : ""), rows: rows.join("\n"),
     total: fmt(total), count: String(lines.length),
-    totalline: lines.length > 1 ? `━━━━━━\nစုစုပေါင်း — <code>${fmt(total)}</code> Ks${priced ? "" : " (ဈေးမရှိတာ ပါနေပါတယ်)"}` : "",
+    totalline: showTotal ? `${SOFT}\n💰 စုစုပေါင်း — <code>${fmt(total)}</code> Ks${priced ? "" : "\n⚠️ ဈေးမရှိတာ ပါနေပါတယ်"}` : "",
   });
 }
 let ALLG = { t: 0, s: null };
@@ -1803,17 +1944,25 @@ function orderMarkup(o) {
   if (o.status !== "processing") rows.push([btn(T.b_again, "zn", "primary")]);
   return { inline_keyboard: rows };
 }
+// KV SAVING: o.fo / o.fr = "the open: / ref: key already exists", o.odS = status last written to the daily report.
+// So each helper key is written once and deleted once per order (before: rewritten / re-deleted on every save).
+// "placing" orders are tracked by the same open: key (no pend: / pendany keys any more): pollOpenOrders marks a stuck one Unknown.
 async function saveOrder(o) {
   const final = !["processing", "placing"].includes(o.status);
   if (final && !o.done) o.done = Date.now();
+  if (o.kv === undefined) { o.kv = 1; o.fo = o.status === "placing" && !o.ref ? 0 : 1; o.fr = 0; }   // an order saved by the old code may already have its open: key
+  const track = o.status === "placing" || (o.status === "processing" && !!o.ref);
+  const putOpen = track && !o.fo, delOpen = !track && !!o.fo;
+  const putRef = !!o.ref && o.provider === "g2bulk" && !o.fr;
+  const putOd = o.status !== "placing" && o.odS !== o.status;
+  if (putOpen) o.fo = 1; if (delOpen) o.fo = 0; if (putRef) o.fr = 1; if (putOd) o.odS = o.status;
   await KV.put("or:" + o.id, JSON.stringify(o), { expirationTtl: 90 * 86400 }).catch(() => {});
-  await KV.put("od:" + dayKey(o.at) + ":" + o.id, JSON.stringify({ u: o.uid, by: o.by, g: o.game, a: o.amount, p: o.price, s: o.status }), { expirationTtl: 45 * 86400 }).catch(() => {});
-  if (o.status === "placing") { await KV.put("pend:" + o.id, "1", { expirationTtl: 3600 }).catch(() => {}); await KV.put("pendany", "1", { expirationTtl: 7200 }).catch(() => {}); }
-  else await KV.delete("pend:" + o.id).catch(() => {});
-  if (o.status === "processing" && o.ref) { await KV.put("open:" + o.id, "1", { expirationTtl: 3 * 86400 }).catch(() => {}); await KV.put("openany", "1", { expirationTtl: 3 * 86400 }).catch(() => {}); }
-  else await KV.delete("open:" + o.id).catch(() => {});
-  if (o.ref && o.provider === "g2bulk") await KV.put("ref:g2:" + o.ref, o.id, { expirationTtl: 3 * 86400 }).catch(() => {});   // callback lookup: G2Bulk order_id -> our order
-  // "openany" / "pendany" are cheap flags: the every-minute cron only does a KV list when one of them exists (no open order = one KV read, nothing else)
+  const jobs = [];
+  if (putOd) jobs.push(KV.put("od:" + dayKey(o.at) + ":" + o.id, JSON.stringify({ u: o.uid, by: o.by, g: o.game, a: o.amount, p: o.price, s: o.status }), { expirationTtl: 45 * 86400 }));
+  if (putOpen) jobs.push(KV.put("open:" + o.id, "1", { expirationTtl: 3 * 86400 }), KV.put("openany", String(Date.now()), { expirationTtl: 3 * 86400 }));   // openany = time of the newest open order
+  if (delOpen) jobs.push(KV.delete("open:" + o.id));
+  if (putRef) jobs.push(KV.put("ref:g2:" + o.ref, o.id, { expirationTtl: 3 * 86400 }));   // callback lookup: G2Bulk order_id -> our order
+  await Promise.all(jobs.map((x) => x.catch(() => {})));
 }
 async function recordBought(o) {                        // what this bot already delivered to an ID (used by the status card)
   if (!o.pid) return;
@@ -1881,7 +2030,14 @@ async function renderOrder(env, o) {
 }
 async function refreshOrder(env, id) {
   const o = await KV.get("or:" + id, "json").catch(() => null);
-  if (!o || o.status !== "processing") return;
+  if (!o) { await KV.delete("open:" + id).catch(() => {}); return; }
+  if (o.status === "placing") {                          // the worker died while calling the provider: never leave that order hanging silently
+    if (Date.now() - o.at < 90 * 1000) return;
+    Object.assign(o, { status: "unknown", error: UNSURE });
+    await saveOrder(o);
+    return renderOrder(env, o);
+  }
+  if (o.status !== "processing") { await KV.delete("open:" + id).catch(() => {}); return; }   // already finished: stop tracking it
   const r = await pollOrder(env, o);
   if (!r) return;
   Object.assign(o, r);
@@ -1890,7 +2046,10 @@ async function refreshOrder(env, id) {
 }
 async function pollOpenOrders(env, full) {              // every minute: finish the orders that were still Processing.  full = also balance watch (every 5 min)
   if (!KV) return;
-  if (await KV.get("openany").catch(() => null)) {
+  const oa = await KV.get("openany").catch(() => null);          // time of the newest open order
+  const age = Date.now() - (Number(oa) || 0), slot = Math.floor(Date.now() / 300000);
+  // KV SAVING: every minute only for 10 min after a new order; then every 5 min (1 h); then every 15 min.  G2Bulk orders finish by callback anyway.
+  if (oa && (age < 10 * 60 * 1000 || (full && (age < 3600 * 1000 || slot % 3 === 0)))) {
     const l = await KV.list({ prefix: "open:", limit: 20 });
     if (!l.keys.length) await KV.delete("openany").catch(() => {});
     await Promise.all(l.keys.map((k) => refreshOrder(env, k.name.slice(5)).catch(() => {})));
@@ -2103,9 +2262,10 @@ async function tplEditText(env, m) {                     // the owner's next mes
   if (isBtn && (t.includes("\n") || [...t.trim()].length > 40)) { await send(env, chat, "⚠️ ခလုတ်စာသားက တစ်ကြောင်းတည်း၊ စာလုံး ၄၀ အထိပါ — ပြန်ပို့ပါ"); return true; }
   let html;
   if (isBtn) {
-    const ces = (m.entities || []).filter((e) => e && e.type === "custom_emoji" && e.custom_emoji_id);
+    const ces = (m.entities || []).filter((e) => e && e.type === "custom_emoji" && e.custom_emoji_id).sort((a, b) => a.offset - b.offset);
+    // A Telegram button can show only ONE premium emoji (the icon). The first one becomes the icon; every other emoji stays in the label as its normal emoji, so all of them show.
     let plain = t;
-    for (const e of [...ces].sort((a, b) => b.offset - a.offset)) plain = plain.slice(0, e.offset) + plain.slice(e.offset + e.length);   // premium emoji leave the text, the first one becomes the button icon
+    if (ces.length) plain = t.slice(0, ces[0].offset) + t.slice(ces[0].offset + ces[0].length);
     plain = plain.replace(/\s+/g, " ").trim();
     if (ces.length && !plain) { await send(env, chat, "⚠️ ခလုတ်မှာ စာသားလည်း ပါရမယ် (premium emoji တစ်ခုတည်း မရပါ) — ပြန်ပို့ပါ"); return true; }
     html = (ces.length ? `[[ce:${ces[0].custom_emoji_id}]] ` : "") + plain;
@@ -2172,11 +2332,14 @@ async function ensureMenu(env, uid, force) {            // true = the menu of th
 }
 
 async function onPrivate(m, env) {
+  await loadKbi().catch(() => {});
+  { const full = KBI_REV.get(String(m.text || "").trim()); if (full) m = { ...m, text: full }; }   // a menu button with a premium icon sends only its text: map it back to the full label
   const chat = m.chat.id, uid = m.from?.id;
   const t = String(m.text || "").trim();
   if (/^\/id(@\w+)?$/i.test(t)) return send(env, chat, `🆔 User ID: <code>${uid}</code>\n💬 Chat ID: <code>${chat}</code>`);
   const admin = isAdmin(env, uid), owner = isOwner(env, uid), kb = owner ? KB : KB_ADMIN;
   if (admin) await ensureMenu(env, uid).catch(() => {});   // once per person (then remembered): the ≡ menu lists 💳 API Balance
+  if (owner && /^\/kbicon(@\w+)?(\s|$)/i.test(t)) return kbIconCommand(env, m, kb);
   if (owner && (await tplEditText(env, m))) return;      // the owner is sending the new text of a card
   if (admin) {
     if (t === "🛒 ဝယ်ယူရန်" || /^\/admin(@\w+)?(\s+list)?$/i.test(t) || /^\/start(@\w+)?\s+admin$/i.test(t)) {
@@ -2285,7 +2448,8 @@ async function onMyChat(c, env) {
   if (!["group", "supergroup"].includes(c.chat?.type)) return;
   const st = c.new_chat_member?.status;
   if (["member", "administrator"].includes(st)) {
-    await KV.put("grp:" + c.chat.id, String(c.chat.title || c.chat.id).slice(0, 60)).catch(() => {});
+    const title = String(c.chat.title || c.chat.id).slice(0, 60);
+    if ((await KV.get("grp:" + c.chat.id).catch(() => null)) !== title) await KV.put("grp:" + c.chat.id, title).catch(() => {});
     SEEN.add(c.chat.id);
   } else if (["left", "kicked"].includes(st)) {
     await KV.delete("grp:" + c.chat.id).catch(() => {});
@@ -2294,6 +2458,10 @@ async function onMyChat(c, env) {
 }
 
 async function handle(u, env) {
+  try { return await handleInner(u, env); }
+  finally { await flushDeletes().catch(() => {}); }   // all auto-delete entries of this update -> one KV write
+}
+async function handleInner(u, env) {
   if (!KV) return;
   await loadTpl(env).catch(() => {});                    // the card templates (cached 20 s) are read synchronously by the card builders
   if (u.callback_query) {
@@ -2303,7 +2471,14 @@ async function handle(u, env) {
   if (u.my_chat_member) return onMyChat(u.my_chat_member, env);
   const m = u.message;
   if (!m || !m.text) return;
-  if (m.chat.type === "private") return onPrivate(m, env);
+  if (m.chat.type === "private") {
+    try { return await onPrivate(m, env); }
+    catch (e) {                                          // never fail silently: an admin sees what broke (and the log keeps it)
+      console.error("onPrivate", m.text, e);
+      if (isAdmin(env, m.from?.id)) await send(env, m.chat.id, "⚠️ <b>Error</b>\n<code>" + esc(String((e && e.message) || e).slice(0, 300)) + "</code>\nခလုတ်: <code>" + esc(String(m.text || "").slice(0, 40)) + "</code>").catch(() => {});
+      return;
+    }
+  }
   if (m.chat.type === "group" || m.chat.type === "supergroup") return onGroupMessage(m, env);
 }
 
