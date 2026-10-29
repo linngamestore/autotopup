@@ -1,0 +1,24 @@
+# LINN Price List Bot — wrangler.toml
+# Put this file in the repo root next to pricelist.js.
+
+name = "topupbot"
+
+main = "pricelist.js"
+compatibility_date = "2025-09-01"
+
+# Every 5 minutes: safety net for orders still Processing (G2Bulk orders finish through the /g2hook callback within seconds)
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "fca3c790aa724801b13142b0c146735b"
+
+# Plain variables (not secret). Without them here, a git deploy can wipe the ones set in the dashboard.
+[vars]
+OWNER_IDS = "7579946276,5949976628"
+ADMIN_IDS = "5949976628,7579946276"
+# LOG_CHAT_ID = "-1001234567890"
+
+# Secrets are NOT written here (they stay in the dashboard and survive deploys):
+#   BOT_TOKEN, WEBHOOK_SECRET, G2BULK_KEY, FAZERCARD_KEY
