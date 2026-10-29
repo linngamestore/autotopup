@@ -670,7 +670,7 @@ const GUIDE = {
     `• ${LOWBAL_USD} USD အောက်ရောက်ရင် Order card တိုင်းမှာ ⚠ သတိပေးပါမယ်\n• အောက်ရောက်တဲ့အချိန် Owner ကို တစ်ခါ အကြောင်းကြားပါမယ်\n• ငွေဖြည့်ပြီးရင် <b>Successfully Deposit</b> လို့ အကြောင်းကြားပါမယ်\n• Balance မရှိတော့ရင် Order မတင်ပါ` },
   quote: { label: "💰 ဈေးပြောနည်း", text:
     "💰 <b>ဈေးပြောနည်း</b>  <i>(Group ထဲ Admin)</i>\n" + LINE + "\n" +
-    "<code>86</code> → ဈေး\n<code>wp 2</code> → wp ၂ ခု (အများဆုံး ၆)\n<code>86 172 wp</code> → အများကြီး + စုစုပေါင်း\n<code>diamond</code> / <code>pass</code> → tab ဇယားအပြည့်\n\n၅ မိနစ်ကြာရင် auto ပျက်ပါမယ်" },
+    "<code>86</code> → ဈေး\n<code>wp 2</code> → wp ၂ ခု (အများဆုံး ၆)\n<code>86 172 wp</code> → အများကြီး + စုစုပေါင်း\n<code>diamond</code> / <code>pass</code> → tab ဇယားအပြည့်\n\nBot ကို private မှာလည်း ပို့ကြည့်လို့ရ\n၅ မိနစ်ကြာရင် auto ပျက်ပါမယ်" },
   result: { label: "📦 Order အခြေအနေ", text:
     "📦 <b>Order အခြေအနေ</b>\n" + LINE + "\n" +
     "◌ <b>Processing</b> — လုပ်ဆောင်နေ (auto ပြင်ပေးမယ်)\n✓ <b>Completed</b> — ပြီးပါပြီ\n✗ <b>Failed</b> — မဝယ်ရ၊ ငွေမကျ\n! <b>Unknown</b> — ရလဒ်မသေချာ\n\n" +
@@ -1621,14 +1621,23 @@ function quoteSection(game, server, lines) {              // one game's quote ca
     totalline: lines.length > 1 ? `━━━━━━\nစုစုပေါင်း — <code>${fmt(total)}</code> Ks${priced ? "" : " (ဈေးမရှိတာ ပါနေပါတယ်)"}` : "",
   });
 }
-async function priceQuote(env, m) {                     // true = answered
+let ALLG = { t: 0, s: null };
+async function allGroupGames(env) {                     // every game that is set for at least one group (cached 60 s)
+  if (ALLG.s && Date.now() - ALLG.t < 60000) return ALLG.s;
+  const s = new Set();
+  for (const g of await listGroups(env)) for (const k of await getAllowed(g.id)) s.add(k);
+  ALLG = { t: Date.now(), s };
+  return s;
+}
+async function priceQuote(env, m, priv) {               // true = answered.  priv = the admin typed it in the bot's private chat
   const chat = m.chat.id, text = String(m.text || "").trim();
   if (!text || text.length > 120 || text.startsWith("/")) return false;
-  const al = await getAllowed(chat);
-  if (!al.length) return false;
+  if (/\d{8,}/.test(text.replace(/[\s,.\-]/g, ""))) return false;          // a Player ID / phone number in the message = an order line, never a price question
   const store = await loadStore(env);
   if (!store.groups) return false;
-  const pool = store.groups.filter((g) => al.includes(g.key));
+  let pool;
+  if (priv) { const s = await allGroupGames(env); pool = store.groups.filter((g) => !s.size || s.has(g.key)); }   // private: the games of all groups (all games if no group is set yet)
+  else { const al = await getAllowed(chat); if (!al.length) return false; pool = store.groups.filter((g) => al.includes(g.key)); }
   if (!pool.length) return false;
   const tm = tabMatches(pool, text);
   if (tm.length) {                                      // a tab name: that tab's bordered table
@@ -2124,6 +2133,8 @@ async function onPrivate(m, env) {
     if (owner && /^\/raw(@\w+)?(\s|$)/i.test(t)) return rawCommand(env, m);
     if (owner && /^\/abbr(@\w+)?(\s|$)/i.test(t)) return abbrCommand(env, chat, t);
     if (await autoBuy(env, m, false)) return;          // "abbr ID [server] package" -> bought at once
+    { const s0 = await getSS(uid);                     // "86" / "wp 2" / "86 172 wp" / "diamond" -> price card (not while the bot waits for an ID / Character Name)
+      if (!(s0 && ["id", "char"].includes(s0.step)) && (await priceQuote(env, m, true))) return; }
   }
   if (admin && !owner) {
     if ((await adminText(env, m)) !== false) return;
@@ -2242,8 +2253,8 @@ export default {
       const r = await tg(env, "setWebhook", { url: `${url.origin}/`, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message", "callback_query", "my_chat_member"] });
       await tg(env, "setMyCommands", { commands: [{ command: "start", description: "ℹ️ အကူအညီ" }] }).catch(() => {});   // buttons replace the commands
       await tg(env, "setMyCommands", { commands: [], scope: { type: "all_group_chats" } }).catch(() => {});
-      for (const id of [...new Set([...idList(env.OWNER_IDS), ...idList(env.ADMIN_IDS)])])   // clear the old per-admin command list
-        await tg(env, "deleteMyCommands", { scope: { type: "chat", chat_id: Number(id) } }).catch(() => {});
+      for (const id of [...new Set([...idList(env.OWNER_IDS), ...idList(env.ADMIN_IDS)])])   // owners / admins: the ≡ menu also lists  💳 API Balance
+        await tg(env, "setMyCommands", { commands: [{ command: "balance", description: "💳 API Balance စစ်ရန်" }, { command: "start", description: "ℹ️ အကူအညီ" }], scope: { type: "chat", chat_id: Number(id) } }).catch(() => {});
       return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
     }
     if (!ORIGIN || ORIGIN !== url.origin) ORIGIN = url.origin;
