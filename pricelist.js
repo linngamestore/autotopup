@@ -23,6 +23,14 @@
 //  In a group the bot asks for the ID by a card: the admin must REPLY to that card.
 //
 //  GUIDE: ℹ️ အကူအညီ (or /start) opens a topic menu (buttons) — each topic is a short step-by-step page.  Edit the texts in GUIDE below.
+//  API BALANCE: ONLY from the ≡ menu (left of the message box) -> 💳 API Balance  (= /balance).  It is not a keyboard button and not a guide page.
+//     The menu is registered by /setup AND by the bot itself the first time an Owner / Admin writes to it (ensureMenu), so it never depends on /setup alone.
+//
+//  ONE THING AT A TIME (per person, private chat):
+//     BUY session    KV "ss:<uid>"   1 h   the order being built (game, package, ID ...)
+//     EDIT session   KV "ed:<uid>"   6 h   the Owner is sending the new text of a card (renewed by every message)
+//     Starting one ends the other (beginEdit deletes the BUY session, adminStart ends the EDIT session).
+//     A keyboard button or a /command always ends an EDIT session.  If an EDIT session has run out, the bot says so (editExpired) instead of the order hint.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════
 //  SETUP CHECKLIST (once)
@@ -62,6 +70,10 @@ let ORIGIN = "";             // https://YOUR-WORKER... (learned from the incomin
 /* ---------- helpers ---------- */
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const stripPremium = (s) => String(s).replace(/<tg-emoji\b[^>]*>([\s\S]*?)<\/tg-emoji>/g, "$1");   // premium emoji -> the plain emoji inside it
+let ICON_REFUSED = false;   // set by tg() when Telegram refused a button premium emoji
+const stripIcons = (mk) => (mk && Array.isArray(mk.inline_keyboard)
+  ? { ...mk, inline_keyboard: mk.inline_keyboard.map((row) => row.map(({ icon_custom_emoji_id, ...b }) => b)) }
+  : mk);
 const idList = (s) => String(s || "").split(/[\s,]+/).filter(Boolean);
 const isOwner = (env, uid) => idList(env.OWNER_IDS).includes(String(uid));
 const isAdmin = (env, uid) => isOwner(env, uid) || idList(env.ADMIN_IDS).includes(String(uid));
@@ -93,6 +105,11 @@ async function tg(env, method, body) {
     const j = await r.json().catch(() => ({ ok: false, error_code: r.status, description: `Telegram ${r.status}` }));
     if (j && j.ok === false && j.error_code === 400 && typeof body?.text === "string" && body.text.includes("<tg-emoji")) {
       body = { ...body, text: stripPremium(body.text) };   // Telegram refused the premium emoji: send the same card with the plain emoji
+      continue;
+    }
+    if (j && j.ok === false && j.error_code === 400 && JSON.stringify(body?.reply_markup || "").includes("icon_custom_emoji_id")) {
+      ICON_REFUSED = true;
+      body = { ...body, reply_markup: stripIcons(body.reply_markup) };   // Telegram refused the premium emoji on a button: same buttons without the icon
       continue;
     }
     if (j && j.ok === false && j.error_code === 429 && attempt < 2 && method !== "answerCallbackQuery") {
@@ -136,7 +153,8 @@ function startButtonSpinner(token, cb, opts = {}) {
     const mapBtn = (n) => (b) => {
       if (n === null || !b || b.callback_data !== cb.data) return b;
       const label = String(b.text || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
-      return { ...b, text: (frameOf(n) + (label ? " " + label : "")).slice(0, 60), callback_data: "spin" };
+      const { icon_custom_emoji_id, ...rest } = b;
+      return { ...rest, text: (frameOf(n) + (label ? " " + label : "")).slice(0, 60), callback_data: "spin" };
     };
     const call = (n) => {                                // n = frame number, or null = put the original buttons back
       const f = mapBtn(n);
@@ -654,20 +672,16 @@ const GUIDE = {
     "<code>ml 1159045022 13678 86</code>\n<i>ဂိမ်းအတိုကောက် · ID · Server · Package</i>\n\n" +
     "ပို့လိုက်တာနဲ့ ID စစ် → <b>တန်းဖြည့်</b> (Confirm မလို)\n\n" +
     "• Server မလိုရင် → <code>ff 123456789 100</code>\n• အရေအတွက် → <code>ml 1159045022 13678 86 x3</code>\n• Package များ → <code>ml 1159045022 13678 86/172/wp2</code>\n• ID များ → စာကြောင်းတစ်ကြောင်း ID တစ်ခု\n\n" +
-    `⚠️ တစ်ကြောင်းမှားရင် ဘာမှမဖြတ်ပါ\nတစ်ခါပို့ Order ${BATCH_MAX} ခုထိ · တစ်ခုကို ×${QTY_MAX} ထိ\nအတိုကောက်ကြည့်ရန် Owner → <code>/abbr</code>` },
+    `⚠️ တစ်ကြောင်းမှားရင် ဘာမှမဖြတ်ပါ\nတစ်ခါပို့ Order ${BATCH_MAX} ခုထိ · တစ်ခုကို ×${QTY_MAX} ထိ\nအတိုကောက်ကြည့်ရန် Owner → <code>/abbr</code>\n\n💳 API Balance → စာရိုက်တဲ့နေရာ ဘေးက <b>≡ menu</b> ထဲက <b>API Balance</b>\n(${LOWBAL_USD} USD အောက်ရောက်ရင် Order card မှာ ⚠ သတိပေး · ငွေဖြည့်ရင် Successfully Deposit အကြောင်းကြား)` },
   tpl: { label: "📋 Template", text:
     "📋 <b>Template</b>  <i>(နှိပ်ရင် copy ရ)</i>\n" + LINE + "\n" +
     "<b>ဝယ်</b>\n<code>ml 1159045022 13678 86</code>\n\n<b>အရေအတွက်</b>\n<code>ml 1159045022 13678 86 x3</code>\n\n<b>Package များ</b>\n<code>ml 1159045022 13678 86/172/wp2</code>\n\n" +
-    "<b>ID များ</b>\n<code>ml 1159045022 13678 86\n1159045023 13679 wp x2</code>\n\n<b>ID / Package စစ်</b>\n<code>ml 1159045022 13678</code>\n\n<b>ဈေးကြည့်</b>\n<code>86 172 wp</code>\n\n<b>Balance</b>\n<code>/balance</code>" },
+    "<b>ID များ</b>\n<code>ml 1159045022 13678 86\n1159045023 13679 wp x2</code>\n\n<b>ID / Package စစ်</b>\n<code>ml 1159045022 13678</code>\n\n<b>ဈေးကြည့်</b>\n<code>86 172 wp</code>\n\n<b>Balance</b>\n≡ menu → 💳 API Balance" },
   check: { label: "🔎 ID စစ်နည်း", text:
     "🔎 <b>ID / Package စစ်နည်း</b>\n" + LINE + "\n" +
     "Package မပါဘဲ ပို့ပါ\n<code>ml 1159045022 13678</code>  သို့  <code>/chk ml 1159045022 13678</code>\n\n" +
     "Name + <b>ဒီ Bot က ဝယ်ပေးပြီးသား</b> package စာရင်း (ရက်နဲ့) ပြပါမယ်\n✅ ❌ Pass / Double Diamond status ကို Provider မပေးလို့ မပြပါ (STATUS_API ထည့်ရင်ပြမယ်)\n\n" +
     "<i>တခြားနေရာက ဝယ်ထားတာ မပါပါ — ဒီ Bot မှတ်တမ်းပဲ။</i>" },
-  bal: { label: "💳 API Balance", text:
-    "💳 <b>API Balance</b>\n" + LINE + "\n" +
-    "<code>/balance</code> → လက်ကျန် (USD)\n\n" +
-    `• ${LOWBAL_USD} USD အောက်ရောက်ရင် Order card တိုင်းမှာ ⚠ သတိပေးပါမယ်\n• အောက်ရောက်တဲ့အချိန် Owner ကို တစ်ခါ အကြောင်းကြားပါမယ်\n• ငွေဖြည့်ပြီးရင် <b>Successfully Deposit</b> လို့ အကြောင်းကြားပါမယ်\n• Balance မရှိတော့ရင် Order မတင်ပါ` },
   quote: { label: "💰 ဈေးပြောနည်း", text:
     "💰 <b>ဈေးပြောနည်း</b>  <i>(Group ထဲ Admin)</i>\n" + LINE + "\n" +
     "<code>86</code> → ဈေး\n<code>wp 2</code> → wp ၂ ခု (အများဆုံး ၆)\n<code>86 172 wp</code> → အများကြီး + စုစုပေါင်း\n<code>diamond</code> / <code>pass</code> → tab ဇယားအပြည့်\n\nBot ကို private မှာလည်း ပို့ကြည့်လို့ရ\n၅ မိနစ်ကြာရင် auto ပျက်ပါမယ်" },
@@ -683,12 +697,12 @@ const GUIDE = {
     `1️⃣ Bot ကို Group ထည့် → Admin လုပ်\n2️⃣ <b>👥 Group စီမံရန်</b> → Group ရွေး\n3️⃣ Game ကို ✅ ပေး/ဖြုတ် (Group တစ်ခုကို ${MAX_GAMES} ခု)\n4️⃣ <b>✅ ပြီးပြီ</b>\n\n📋 <b>သတ်မှတ်ထားတာများ</b> — Group အလိုက် ကြည့်\n🔄 <b>Game list refresh</b> — Store ပြင်ပြီး ချက်ချင်းယူ`, owner: true },
   cards: { label: "🎨 Card ပြင်နည်း", text:
     "🎨 <b>Card ပြင်နည်း</b>  <i>(Owner)</i>\n" + LINE + "\n" +
-    "1️⃣ <b>🎨 Card ပြင်ရန်</b> → Card ရွေး\n2️⃣ စာအသစ်ကို format လုပ်ပြီး ပို့\n3️⃣ <code>{price}</code> <code>{amount}</code> <code>{id}</code> လို placeholder သုံး\n\nကျိုးတဲ့ card ဆိုရင် မူလ card ပြန်သုံးမယ်၊ Reset လည်းရ", owner: true },
+    "1️⃣ <b>🎨 Card ပြင်ရန်</b> → Card ရွေး → ✏️ ပြင်မယ်\n2️⃣ စာအသစ်ကို format လုပ်ပြီး ပို့ (message တစ်ခုတည်း)\n3️⃣ <code>{price}</code> <code>{amount}</code> <code>{id}</code> လို placeholder သုံး\n\n⏱ ပြင်ချိန် ၆ နာရီအထိ ရပါတယ် — ❌ ပယ်ဖျက် နှိပ်မှ (သို့) တခြား ခလုတ်နှိပ်မှ ထွက်မယ်\nကျိုးတဲ့ card ဆိုရင် မူလ card ပြန်သုံးမယ်၊ Reset လည်းရ", owner: true },
   fix: { label: "🛠 ပြဿနာ", text:
     "🛠 <b>ပြဿနာဖြေရှင်းရန်</b>\n" + LINE + "\n" +
     "<b>✗ မဝယ်ရသေးပါ</b> → card ထဲက စာကြောင်းကို ပြင်ပြီး ပြန်ပို့ (ဘာမှ မဖြတ်ရသေး)\n<b>အတိုကောက် မမှန်</b> → Owner <code>/abbr</code>\n<b>ID စစ်မရ</b> → ခဏနေ ပြန်ပို့\n<b>List မပေါ်</b> → Bot ကို Group Admin လုပ် · 👥 Group စီမံရန်မှာ Game သတ်မှတ်\n<b>Admin ခလုတ် မရ</b> → Bot ကို private မှာ Start နှိပ်\n<b>Store data မရ</b> → 🔄 Game list refresh\n\nကိုယ့် ID → private မှာ <code>/id</code>", owner: true },
 };
-const GUIDE_ORDER = ["buy", "tpl", "check", "bal", "quote", "result", "member", "group", "cards", "fix"];
+const GUIDE_ORDER = ["buy", "tpl", "check", "quote", "result", "member", "group", "cards", "fix"];
 function guideView(topic, owner) {
   const ok = (k) => GUIDE[k] && (owner || !GUIDE[k].owner);
   const close = btn("❌ ပိတ်", "hx", "danger");
@@ -698,7 +712,7 @@ function guideView(topic, owner) {
   rows.push([close]);
   return { text: "ℹ️ <b>အကူအညီ</b>\n\nရွေးပါ 👇\n\n<i>အမြန်ဝယ်</i> <code>ml 1159045022 13678 86</code>", markup: { inline_keyboard: rows } };
 }
-const WELCOME = (owner) => "👋 <b>LINN Price List Bot</b>\n" + (owner ? "Owner" : "Admin") + " အနေနဲ့ ဝင်ထားပါတယ်။\n🛒 <code>ml 1159045022 13678 86</code> → တန်းဖြည့်\n🔎 <code>ml 1159045022 13678</code> → ID / Package စစ်\nℹ️ သုံးနည်း → <b>အကူအညီ</b>";
+const WELCOME = (owner) => "👋 <b>LINN Price List Bot</b>\n" + (owner ? "Owner" : "Admin") + " အနေနဲ့ ဝင်ထားပါတယ်။\n🛒 <code>ml 1159045022 13678 86</code> → တန်းဖြည့်\n🔎 <code>ml 1159045022 13678</code> → ID / Package စစ်\nℹ️ သုံးနည်း → <b>အကူအညီ</b>\n💳 API Balance → ဘေးက <b>≡ menu</b>";
 async function onGuideCallback(q, env) {
   const chat = q.message.chat.id, mid = q.message.message_id;
   const owner = isOwner(env, q.from.id);
@@ -786,7 +800,12 @@ const PKG_PAGE = 12;
 const SRV_PAGE = 12;
 const fmt = (n) => Number(n || 0).toLocaleString("en-US");
 const cut = (s, n) => String(s).slice(0, n);
-const btn = (text, data, style) => ({ text: ell(text, 40), callback_data: data, ...(style ? { style } : {}) });
+// A button label saved from the bot may start with "[[ce:<custom emoji id>]] " = a premium emoji shown before the text (Bot API icon_custom_emoji_id).
+const CE_RE = /^\[\[ce:(\d{5,30})\]\]\s*/;
+const btn = (text, data, style) => {
+  const s = String(text), m = CE_RE.exec(s);
+  return { text: ell(m ? s.slice(m[0].length) : s, 40), callback_data: data, ...(m ? { icon_custom_emoji_id: m[1] } : {}), ...(style ? { style } : {}) };
+};
 // Tidy button helpers: one pager look everywhere (the first / last page shows an inert "·" instead of an arrow that
 // only reloads the same page) and long labels end with "…" instead of being cut in the middle.
 const ell = (s, n) => { s = String(s); return s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s; };
@@ -1032,6 +1051,7 @@ async function show(env, chat, ss, v) {
 
 /* ----- flow control ----- */
 async function adminStart(env, uid, src) {              // sends the game list to the admin's private chat; false = could not DM
+  await endEdit(uid);                                   // a new order ends any card editing
   const store = await loadStore(env);
   if (!store.groups) { const r = await send(env, uid, "⚠️ Store data မရနိုင်သေးပါ၊ ခဏနေ ပြန်စမ်းပါ။"); return !!r?.ok; }
   const v = gameListView(store, "", 0);
@@ -2031,7 +2051,7 @@ function btnMenuView() {
 function tplCardView(key) {
   const custom = !!(tplNow()._custom || {})[key];
   if (TPL_BTN_KEYS.includes(key)) return {
-    text: `<b>${TPL_LABEL[key]}</b>\n${custom ? "🎨 ပြင်ထားတဲ့ စာသား သုံးနေပါတယ်" : "Default စာသား သုံးနေပါတယ်"}\n<code>${esc(tplNow()[key])}</code>\n\n${TPL_HINT[key]}`,
+    text: `<b>${TPL_LABEL[key]}</b>\n${custom ? "🎨 ပြင်ထားတဲ့ စာသား သုံးနေပါတယ်" : "Default စာသား သုံးနေပါတယ်"}\n<code>${esc(String(tplNow()[key]).replace(CE_RE, "(premium emoji) "))}</code>\n\n${TPL_HINT[key]}`,
     markup: { inline_keyboard: [[btn("✏️ ပြင်မယ်", "ee:" + key, "primary"), btn("👁 Preview", "ep:" + key)], [btn("♻️ Default ပြန်ထား", "er:" + key, "danger"), btn("⬅️ ခလုတ်များ", "eb")]] },
   };
   return {
@@ -2046,7 +2066,7 @@ function tplCardView(key) {
 const phHelp = (key) => PH_LIST[key].map(([n, d]) => `<code>{${n}}</code> — ${d}`).join("\n");
 function editPrompt(key) {
   if (TPL_BTN_KEYS.includes(key)) return {
-    text: `✏️ <b>${TPL_LABEL[key]}</b> ကို ပြင်မယ်\n\nခလုတ်ပေါ်မှာ ပေါ်စေချင်တဲ့ စာကို <b>တစ်ကြောင်းတည်း</b> (စာလုံး ၄၀ အထိ) ပို့ပါ။ ပုံမှန် emoji ထည့်လို့ရပါတယ် — ခလုတ်ထဲမှာ bold / premium emoji မပြနိုင်ပါဘူး (Telegram ကန့်သတ်ချက်)။`,
+    text: `✏️ <b>${TPL_LABEL[key]}</b> ကို ပြင်မယ်\n\nခလုတ်ပေါ်မှာ ပေါ်စေချင်တဲ့ စာကို <b>တစ်ကြောင်းတည်း</b> (စာလုံး ၄၀ အထိ) ပို့ပါ။ ပုံမှန် emoji ထည့်လို့ရပါတယ်။\n\nPremium emoji ထည့်ချင်ရင် တစ်ခုပဲ ထည့်ပါ — ခလုတ်ရဲ့ ဘယ်ဘက်စွန်းမှာ ပေါ်ပါမယ် (စာအတွင်း premium emoji နဲ့ bold မပြနိုင်ပါ)။ Bot ပိုင်ရှင် account မှာ Telegram Premium ရှိရပါမယ်။`,
     markup: { inline_keyboard: [[btn("❌ ပယ်ဖျက်", "ev:" + key, "danger")]] },
   };
   return {
@@ -2057,35 +2077,60 @@ function editPrompt(key) {
     markup: { inline_keyboard: [[btn("❌ ပယ်ဖျက်", "ev:" + key, "danger")]] },
   };
 }
+const ED_TTL = 6 * 60 * 60;                              // an EDIT session lasts 6 h (renewed by every message); "edx" only remembers it for 24 h so an expired one can be explained
+const endEdit = (uid) => Promise.all([KV.delete("ed:" + uid), KV.delete("edx:" + uid)]).catch(() => {});
+async function beginEdit(uid, key) {                    // starting to edit a card ends any order being built
+  await delSS(uid);
+  const v = JSON.stringify({ key });
+  await Promise.all([KV.put("ed:" + uid, v, { expirationTtl: ED_TTL }), KV.put("edx:" + uid, v, { expirationTtl: 86400 })]).catch(() => {});
+}
+async function editExpired(env, chat, uid) {            // true = the Owner's EDIT session had run out, he was told (instead of the order hint)
+  const st = await KV.get("edx:" + uid, "json").catch(() => null);
+  if (!st || !TPL_DEF[st.key]) return false;
+  await KV.delete("edx:" + uid).catch(() => {});
+  await send(env, chat, `⏳ <b>${TPL_LABEL[st.key]}</b> ပြင်တဲ့ အချိန်ကုန်သွားလို့ ဒီစာကို မသိမ်းရပါ\n✏️ ပြန်နှိပ်ပြီး စာကို ပြန်ပို့ပါ`, { reply_markup: { inline_keyboard: [[btn("✏️ ပြန်ပြင်မယ်", "ee:" + st.key, "primary")]] } });
+  return true;
+}
 async function tplEditText(env, m) {                     // the owner's next message is the new card; false = not editing
   const uid = m.from.id, chat = m.chat.id, t = String(m.text || "");
   const st = await KV.get("ed:" + uid, "json").catch(() => null);
   if (!st || !TPL_DEF[st.key]) return false;
-  if (KB_LABELS.has(t.trim()) || /^\/\w+/.test(t.trim())) { await KV.delete("ed:" + uid).catch(() => {}); return false; }   // a keyboard button / command ends the editing
+  if (KB_LABELS.has(t.trim()) || /^\/\w+/.test(t.trim())) { await endEdit(uid); return false; }   // a keyboard button / command ends the editing
+  await KV.put("ed:" + uid, JSON.stringify({ key: st.key }), { expirationTtl: ED_TTL }).catch(() => {});   // still editing: renew the 6 h
   const key = st.key;
   const back = { inline_keyboard: [[btn(TPL_BTN_KEYS.includes(key) ? "⬅️ ခလုတ်များ" : "⬅️ Card များ", TPL_BTN_KEYS.includes(key) ? "eb" : "ec"), btn("✏️ ထပ်ပြင်", "ee:" + key)]] };
   const isBtn = TPL_BTN_KEYS.includes(key);
   if (isBtn && (t.includes("\n") || [...t.trim()].length > 40)) { await send(env, chat, "⚠️ ခလုတ်စာသားက တစ်ကြောင်းတည်း၊ စာလုံး ၄၀ အထိပါ — ပြန်ပို့ပါ"); return true; }
-  const html = isBtn ? t.trim() : (/^html:/i.test(t.trim()) ? t.trim().replace(/^html:\s*/i, "") : entitiesToHtml(t, m.entities)).trim();
+  let html;
+  if (isBtn) {
+    const ces = (m.entities || []).filter((e) => e && e.type === "custom_emoji" && e.custom_emoji_id);
+    let plain = t;
+    for (const e of [...ces].sort((a, b) => b.offset - a.offset)) plain = plain.slice(0, e.offset) + plain.slice(e.offset + e.length);   // premium emoji leave the text, the first one becomes the button icon
+    plain = plain.replace(/\s+/g, " ").trim();
+    if (ces.length && !plain) { await send(env, chat, "⚠️ ခလုတ်မှာ စာသားလည်း ပါရမယ် (premium emoji တစ်ခုတည်း မရပါ) — ပြန်ပို့ပါ"); return true; }
+    html = (ces.length ? `[[ce:${ces[0].custom_emoji_id}]] ` : "") + plain;
+  } else html = (/^html:/i.test(t.trim()) ? t.trim().replace(/^html:\s*/i, "") : entitiesToHtml(t, m.entities)).trim();
   if (!html) { await send(env, chat, "⚠️ စာမပါပါဘူး — ပြန်ပို့ပါ"); return true; }
   if (html.length > 3000) { await send(env, chat, `⚠️ ရှည်လွန်းပါတယ် (${html.length} / 3000) — တိုတိုလေး ပြန်ပို့ပါ`); return true; }
   const card = previewWith(key, html);
+  ICON_REFUSED = false;
   const r = await send(env, chat, card.text, { ...(card.markup ? { reply_markup: card.markup } : {}), disable_web_page_preview: true });
   if (!r?.ok) {
     await send(env, chat, `⚠️ Telegram က ဒီပုံစံကို လက်မခံပါ\n<code>${esc(r?.description || "error")}</code>\nပြင်ပြီး ပြန်ပို့ပါ၊ မပြင်တော့ရင် ❌ နှိပ်ပါ`, { reply_markup: { inline_keyboard: [[btn("❌ ပယ်ဖျက်", "ev:" + key, "danger")]] } });
     return true;
   }
   await saveTpl(env, key, html);
-  await KV.delete("ed:" + uid).catch(() => {});
+  await endEdit(uid);
   const bad = isBtn ? [] : unknownPh(key, html);
-  await send(env, chat, `✅ <b>${TPL_LABEL[key]}</b> သိမ်းပြီးပါပြီ — အပေါ်က preview အတိုင်း ပေါ်ပါမယ်${bad.length ? `\n⚠️ မသိတဲ့ placeholder: ${bad.map((x) => `<code>{${x}}</code>`).join(" ")}` : ""}`, { reply_markup: back });
+  const iconWarn = isBtn && ICON_REFUSED ? "\n⚠️ Telegram က ခလုတ်ထဲ premium emoji ကို လက်မခံပါဘူး — စာသားပဲ ပေါ်မယ်။ Bot ပိုင်ရှင် account မှာ Telegram Premium ရှိမှ ပေါ်ပါမယ်" : "";
+  await send(env, chat, `✅ <b>${TPL_LABEL[key]}</b> သိမ်းပြီးပါပြီ — အပေါ်က preview အတိုင်း ပေါ်ပါမယ်${iconWarn}${bad.length ? `\n⚠️ မသိတဲ့ placeholder: ${bad.map((x) => `<code>{${x}}</code>`).join(" ")}` : ""}`, { reply_markup: back });
   return true;
 }
 async function onTplCallback(q, env, ans, edit) {
   const chat = q.message.chat.id, uid = q.from.id;
   const [tag, k] = String(q.data).split(":");
   const key = TPL_DEF[k] ? k : "";
-  if (tag === "ec") { await ans(); await KV.delete("ed:" + uid).catch(() => {}); return edit(tplMenuView()); }
+  if (tag === "ec") { await ans(); await endEdit(uid); return edit(tplMenuView()); }
   if (tag === "ez") {
     await ans();
     return edit({ text: "♻️ <b>Card အားလုံးကို Default ပြန်ထားမလား?</b>\nပြင်ထားတာ အကုန်ပျက်သွားပါမယ်", markup: { inline_keyboard: [[btn("✅ ဟုတ်ပါတယ်", "ezy", "danger"), btn("⬅️ မလုပ်တော့ဘူး", "ec")]] } });
@@ -2093,10 +2138,10 @@ async function onTplCallback(q, env, ans, edit) {
   if (tag === "ezy") { await ans("♻️ Default ပြန်ထားပြီး"); await saveTpl(env, null, null); return edit(tplMenuView()); }
   if (tag === "eb") { await ans(); return edit(btnMenuView()); }
   if (!key) return ans();
-  if (tag === "ev") { await ans(); await KV.delete("ed:" + uid).catch(() => {}); return edit(tplCardView(key)); }
+  if (tag === "ev") { await ans(); await endEdit(uid); return edit(tplCardView(key)); }
   if (tag === "ee") {
     await ans();
-    await KV.put("ed:" + uid, JSON.stringify({ key }), { expirationTtl: 1800 }).catch(() => {});
+    await beginEdit(uid, key);
     return edit(editPrompt(key));
   }
   if (tag === "ep") {
@@ -2110,11 +2155,28 @@ async function onTplCallback(q, env, ans, edit) {
   return ans();
 }
 
+/* ---------- ≡ menu (left of the message box): 💳 API Balance + ℹ️ အကူအညီ, for Owners / Admins only ---------- */
+const MENU_V = "m3";                                    // bump to make every Owner / Admin menu register again
+const MENU_CMDS = [{ command: "balance", description: "💳 API Balance ကြည့်ရန်" }, { command: "start", description: "ℹ️ အကူအညီ" }];
+const MENU_OK = new Set();
+async function ensureMenu(env, uid, force) {            // true = the menu of this person is in place
+  const k = MENU_V + ":" + uid;
+  if (!force && MENU_OK.has(k)) return true;
+  if (!force && (await KV.get("menu:" + k).catch(() => null))) { MENU_OK.add(k); return true; }
+  const a = await tg(env, "setMyCommands", { commands: MENU_CMDS, scope: { type: "chat", chat_id: Number(uid) } });
+  await tg(env, "setChatMenuButton", { chat_id: Number(uid), menu_button: { type: "commands" } });
+  if (!a?.ok) return false;
+  await KV.put("menu:" + k, "1").catch(() => {});
+  MENU_OK.add(k);
+  return true;
+}
+
 async function onPrivate(m, env) {
   const chat = m.chat.id, uid = m.from?.id;
   const t = String(m.text || "").trim();
   if (/^\/id(@\w+)?$/i.test(t)) return send(env, chat, `🆔 User ID: <code>${uid}</code>\n💬 Chat ID: <code>${chat}</code>`);
   const admin = isAdmin(env, uid), owner = isOwner(env, uid), kb = owner ? KB : KB_ADMIN;
+  if (admin) await ensureMenu(env, uid).catch(() => {});   // once per person (then remembered): the ≡ menu lists 💳 API Balance
   if (owner && (await tplEditText(env, m))) return;      // the owner is sending the new text of a card
   if (admin) {
     if (t === "🛒 ဝယ်ယူရန်" || /^\/admin(@\w+)?(\s+list)?$/i.test(t) || /^\/start(@\w+)?\s+admin$/i.test(t)) {
@@ -2151,6 +2213,7 @@ async function onPrivate(m, env) {
     return send(env, chat, s.groups ? `🔄 Refresh လုပ်ပြီးပါပြီ\n💎 Top Up: ${s.groups.filter((g) => g.kind === "t").length}\n🎟 Voucher: ${s.groups.filter((g) => g.kind === "v").length}` : "⚠️ Store data မရနိုင်သေးပါ", { reply_markup: KB });
   }
   if ((await adminText(env, m)) !== false) return;
+  if (await editExpired(env, chat, uid)) return;
   return send(env, chat, quickHint(t), { reply_markup: KB });
 }
 
@@ -2251,11 +2314,11 @@ export default {
     if (url.pathname === "/setup") {
       if (url.searchParams.get("key") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
       const r = await tg(env, "setWebhook", { url: `${url.origin}/`, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message", "callback_query", "my_chat_member"] });
-      await tg(env, "setMyCommands", { commands: [{ command: "start", description: "ℹ️ အကူအညီ" }] }).catch(() => {});   // buttons replace the commands
+      await tg(env, "setMyCommands", { commands: [{ command: "start", description: "ℹ️ အကူအညီ" }] }).catch(() => {});   // everyone else: only Start
       await tg(env, "setMyCommands", { commands: [], scope: { type: "all_group_chats" } }).catch(() => {});
-      for (const id of [...new Set([...idList(env.OWNER_IDS), ...idList(env.ADMIN_IDS)])])   // owners / admins: the ≡ menu also lists  💳 API Balance
-        await tg(env, "setMyCommands", { commands: [{ command: "balance", description: "💳 API Balance စစ်ရန်" }, { command: "start", description: "ℹ️ အကူအညီ" }], scope: { type: "chat", chat_id: Number(id) } }).catch(() => {});
-      return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
+      const menu = {};                                  // owners / admins: ≡ menu = 💳 API Balance + ℹ️ အကူအညီ   (true = Telegram accepted it)
+      for (const id of [...new Set([...idList(env.OWNER_IDS), ...idList(env.ADMIN_IDS)])]) menu[id] = await ensureMenu(env, id, true).catch(() => false);
+      return new Response(JSON.stringify({ webhook: r, menu }), { headers: { "content-type": "application/json" } });
     }
     if (!ORIGIN || ORIGIN !== url.origin) ORIGIN = url.origin;
     if (url.pathname === "/g2hook") {                    // G2Bulk "order finished" callback
