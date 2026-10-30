@@ -744,18 +744,18 @@ async function kbIconCommand(env, m, kb) {
 }
 /* ---------- ℹ️ Guide: a topic menu (buttons), every topic is one short step-by-step page ---------- */
 // callback tags: "h:<topic>" opens a topic, "h:" (empty) = the menu, "hx" closes.  owner: true = Owner only.
-const BATCH_MAX = 10, QTY_MAX = 10, LOWBAL_USD = 10;
+const BATCH_MAX = 10, QTY_MAX = 10, LOWBAL_USD = 10, CONFIRM_DEFAULT = 100000;
 const GUIDE = {
   buy: { label: "🛒 ဝယ်နည်း", text:
     "🛒 <b>ဝယ်နည်း</b>  <i>(Admin သာ)</i>\n" + LINE + "\n" +
     "<code>ml 1159045022 13678 86</code>\n<i>ဂိမ်းအတိုကောက် · ID · Server · Package</i>\n\n" +
     "ပို့လိုက်တာနဲ့ ID စစ် → <b>တန်းဖြည့်</b> (Confirm မလို)\n\n" +
-    "• Server မလိုရင် → <code>ff 123456789 100</code>\n• အရေအတွက် → <code>ml 1159045022 13678 86 x3</code>\n• Package များ → <code>ml 1159045022 13678 86/172/wp2</code>\n• ID များ → စာကြောင်းတစ်ကြောင်း ID တစ်ခု\n\n" +
-    `⚠️ တစ်ကြောင်းမှားရင် ဘာမှမဖြတ်ပါ\nတစ်ခါပို့ Order ${BATCH_MAX} ခုထိ · တစ်ခုကို ×${QTY_MAX} ထိ\nအတိုကောက်ကြည့်ရန် Owner → <code>/abbr</code>\n\n💳 API Balance → စာရိုက်တဲ့နေရာ ဘေးက <b>≡ menu</b> ထဲက <b>API Balance</b>\n(${LOWBAL_USD} USD အောက်ရောက်ရင် Order card မှာ ⚠ သတိပေး · ငွေဖြည့်ရင် Successfully Deposit အကြောင်းကြား)` },
+    "• Server မလိုရင် → <code>ff 123456789 100</code>\n• အရေအတွက် → <code>ml 1159045022 13678 86x3</code> (<code>86 x3</code> · <code>x3 86</code> လည်းရ)\n• Package များ → <code>ml 1159045022 13678 86x2 172 wp2</code> (<code>/</code> နဲ့လည်းရ)\n• ID များ → စာကြောင်းတစ်ကြောင်း ID တစ်ခု\n\n" +
+    `⚠️ တစ်ကြောင်းမှားရင် ဘာမှမဖြတ်ပါ\nတစ်ခါပို့ Order ${BATCH_MAX} ခုထိ · တစ်ခုကို ×${QTY_MAX} ထိ\nစုစုပေါင်း ${CONFIRM_DEFAULT.toLocaleString("en-US")} Ks ကျော်ရင် ✅ ခလုတ်နှိပ်မှ ဝယ်မယ်\nPackage အများကြီးရဲ့ နောက်မှာ အရေအတွက် မထားပါနဲ့ → <code>86x2 172</code> · <code>86/172x2</code> · <code>172/wp2</code>\nအောင်မြင်တဲ့ Order card မှာ 🔁 ထပ်ဝယ် ခလုတ်ပါ\nအတိုကောက်ကြည့်ရန် Owner → <code>/abbr</code>\n\n💳 API Balance → စာရိုက်တဲ့နေရာ ဘေးက <b>≡ menu</b> ထဲက <b>API Balance</b>\n(${LOWBAL_USD} USD အောက်ရောက်ရင် Order card မှာ ⚠ သတိပေး · ငွေဖြည့်ရင် Successfully Deposit အကြောင်းကြား)` },
   tpl: { label: "📋 Template", text:
     "📋 <b>Template</b>  <i>(နှိပ်ရင် copy ရ)</i>\n" + LINE + "\n" +
-    "<b>ဝယ်</b>\n<code>ml 1159045022 13678 86</code>\n\n<b>အရေအတွက်</b>\n<code>ml 1159045022 13678 86 x3</code>\n\n<b>Package များ</b>\n<code>ml 1159045022 13678 86/172/wp2</code>\n\n" +
-    "<b>ID များ</b>\n<code>ml 1159045022 13678 86\n1159045023 13679 wp x2</code>\n\n<b>ID / Package စစ်</b>\n<code>ml 1159045022 13678</code>\n\n<b>ဈေးကြည့်</b>\n<code>86 172 wp</code>\n\n<b>Balance</b>\n≡ menu → 💳 API Balance" },
+    "<b>ဝယ်</b>\n<code>ml 1159045022 13678 86</code>\n\n<b>အရေအတွက်</b>\n<code>ml 1159045022 13678 86x3</code>\n\n<b>Package များ</b>\n<code>ml 1159045022 13678 86x2 172 wp2</code>\n\n" +
+    "<b>ID များ</b>\n<code>ml 1159045022 13678 86\n1159045023 13679 wp x2</code>\n\n<b>ID / Package စစ်</b>\n<code>ml 1159045022 13678</code>\n\n<b>ဈေးကြည့်</b>\n<code>86x2 172 wp</code>\n\n<b>Balance</b>\n≡ menu → 💳 API Balance" },
   check: { label: "🔎 Name စစ်နည်း", text:
     "🔎 <b>ID / Package စစ်နည်း</b>\n" + LINE + "\n" +
     "Package မပါဘဲ ပို့ပါ\n<code>ml 1159045022 13678</code>  သို့  <code>/chk ml 1159045022 13678</code>\n\n" +
@@ -1234,6 +1234,7 @@ async function adminText(env, m) {                      // admin typed the Playe
 /* ----- quick order: the admin types "ID + amount"  (123456789 2001 86  /  123456789(2001) wp  /  123456789 wp) ----- */
 const Q_FILLER = new Set(["dia", "dias", "diamond", "diamonds", "dmd", "ဒိုင်ယာ", "x", "pcs", "mmk"]);
 const Q_SPLIT = /[^\p{L}\p{M}\p{N}]+/u;
+const mmDigits = (s) => String(s ?? "").replace(/[၀-၉]/g, (c) => String(c.charCodeAt(0) - 0x1040)).replace(/[０-９]/g, (c) => String(c.charCodeAt(0) - 0xFF10));   // ၈၆x၂ -> 86x2  (Myanmar and full-width digits)
 function amtTokens(s) {                                 // "86 Diamonds" -> ["86"],  "Weekly Pass" / "wp" -> ["wp"],  "2wp" -> ["2","wp"]
   return String(s ?? "").toLowerCase()
     .replace(/^\s*(\d{1,4})\s*\+\s*\d{1,4}/, "$1 dd")                       // double-diamond package "50+50 Diamonds" -> ["50","dd"]  (typed "50+" gives the same)
@@ -1243,7 +1244,7 @@ function amtTokens(s) {                                 // "86 Diamonds" -> ["86
 }
 const pkgInit = (s) => String(s ?? "").toLowerCase().replace(/[^a-z\s]+/g, " ").split(/\s+/).filter((w) => w && !Q_FILLER.has(w)).map((w) => w[0]).join("");   // "Monthly Elite Bundle" -> "meb", "Weekly Pass" -> "wp"
 function parseQuick(text) {                             // -> { id, rest[] } or null (not an order-looking message)
-  const t = String(text || "").trim();
+  const t = mmDigits(text).trim();
   if (!t || t.length > 80 || t.startsWith("/")) return null;
   const tk = t.toLowerCase().split(Q_SPLIT).filter(Boolean);
   const i = tk.findIndex((x) => /^\d{5,14}$/.test(x) && !/^09\d{7,9}$/.test(x));   // first long number = Player ID (phone numbers skipped)
@@ -1274,37 +1275,6 @@ function quickMatches(pool, pq) {                       // every (game, server, 
   });
   const seen = new Set();
   return (exact.length ? exact : loose).filter((h) => { const k = h.group.id + "|" + h.ei + "|" + h.pi; if (seen.has(k)) return false; seen.add(k); return true; });
-}
-async function quickOrder(env, m, inGroup) {            // true = the message was an order and has been answered
-  const uid = m.from?.id, chat = m.chat.id;
-  const pq = uid ? parseQuick(m.text) : null;
-  if (!pq) return false;
-  const store = await loadStore(env);
-  if (!store.groups) return false;
-  let pool = store.groups;
-  if (inGroup) { const al = await getAllowed(chat); pool = pool.filter((g) => al.includes(g.key)); if (!pool.length) return false; }   // a group only handles the games set for it
-  const hits = quickMatches(pool, pq);
-  if (!hits.length) {
-    if (!(inGroup && pq.rest.length <= 3 && pq.rest.some((x) => /^\d{1,5}$/.test(x) || /^(wp|dias?)$/.test(x)))) return false;
-    const r = await send(env, chat, "⚠️ <b>Package မတွေ့ပါ</b>\nAmount ကို ပြန်စစ်ပါ — ဥပမာ <code>123456789 2001 86</code> သို့ <code>123456789 wp</code>", replyTo(m.message_id));
-    await scheduleDelete(env, chat, r?.result?.message_id, 20 * 1000);
-    return true;
-  }
-  const ss = { step: "detail", src: inGroup ? String(m.chat.title || "") : "", chat, rt: m.message_id, mid: 0 };
-  if (hits.length > 1) {                                // same amount in several games / servers: let the admin pick
-    const list = hits.slice(0, 8);
-    ss.step = "pickq"; ss.qpid = pq.id; ss.cands = list.map((h) => ({ gid: h.group.id, ei: h.ei, pi: h.pi, sid: h.sid }));
-    const rows = list.map((h, i) => { const e = h.group.entries[h.ei], p = e.packages[h.pi]; return [btn(`${h.group.name}${e.server ? " · " + e.server : ""} · ${p.amount ?? "-"} · ${fmt(p.price)}`, `zk:${i}`, "primary")]; });
-    rows.push([btn("❌ Cancel", "zx", "danger")]);
-    await show(env, chat, ss, { text: `🔎 <b>ကိုက်တာ ${hits.length} ခု တွေ့ပါတယ်</b>\n🆔 <code>${esc(pq.id)}</code>\nရွေးပါ 👇`, markup: { inline_keyboard: rows } });
-    await putSS(uid, ss);
-    return true;
-  }
-  const h = hits[0];
-  ss.gid = h.group.id; ss.ei = h.ei; ss.tab = 0; ss.page = 0;
-  await pickPackage(env, chat, ss, store, h.pi, { pid: pq.id, sid: h.sid });
-  await putSS(uid, ss);
-  return true;
 }
 /* ----- AUTO BUY: "abbr ID [server] package [xN]"  — Admin only, no Confirm step -----
    ml 1159045022 13678 86            one order
@@ -1384,53 +1354,92 @@ async function watchBalance(env) {                       // low balance (once) a
     await tell(`<b>⚠ API Balance နည်းနေပါပြီ</b>\n${LINE}\n<code>Balance </code> <b>${b.toFixed(2)} USD</b>\n<code>Limit   </code> ${LOWBAL_USD} USD\nအမြန်ဖြည့်ပါ`);
   } else if (b >= LOWBAL_USD && low) await KV.delete("bal:low").catch(() => {});
 }
-/* ----- ×N (quantity) — ONE reader for orders; the quote reader (quoteItems) follows the same rules -----
+/* ----- ×N (quantity) — ONE reader for orders AND price quotes (quoteItems below uses it too) -----
    86x2 · 86 x2 · 86 x 2 · 86×2 · 86*2 · 86X2   quantity AFTER the package
-   x2 86 · 2x86                                  quantity BEFORE it (a small number in front of a big one: 2x86 = 2 × "86")
-   wp2 · wp 2 · wpx2 · wp x2                     a letter package with its quantity
+   x2 86 · 2x86 · 2 x 86                         quantity BEFORE it (a small number in front of a big one: 2x86 = 2 × "86")
+   wp2 · wp 2 · wpx2 · wp x2 · 2wp · wp2x3 (= 6)  a letter package with its quantity
+   86x2 172 · 86 x2 172 x3 · wp2 86              a quantity in the MIDDLE closes that package, the next one starts fresh
    86/86 · 86 86 · 86x2/86                        same package again = added up
-   Anything above QTY_MAX is not guessed: the order is refused with a clear line instead. */
-function takeQty(s) {                                    // "86x2" -> { rest: "86", qty: 2 }
-  s = String(s).toLowerCase().replace(/[×✕✖*]/g, "x").replace(/\s+/g, " ").trim();
-  let m = s.match(/^(.*?\S)\s*x\s*(\d{1,3})$/);
-  if (m) {
-    let rest = m[1], qty = Number(m[2]);
-    if (qty > QTY_MAX) {                                 // "2x86": the small number in front is the quantity, the big one is the package
-      const p = rest.match(/(?:^|\s)(\d{1,2})$/);
-      if (p && Number(p[1]) >= 1 && Number(p[1]) <= QTY_MAX) { rest = (rest.slice(0, p.index) + " " + m[2]).trim(); qty = Number(p[1]); }
+   86 172 x2  (a quantity after SEVERAL packages) is never guessed: orders are refused, quotes ask to split it  ->  86x2 172  or  86/172x2
+   Anything above QTY_MAX is not guessed either: the order is refused with a clear line instead. */
+const isBigNum = (x) => /^\d{5,}$/.test(x);               // Player ID / Server ID
+function readQtySeg(str) {                               // "86x2 172" -> [{ tk:["86"], qty:2 }, { tk:["172"], qty:1 }]
+  const s = String(str).toLowerCase().replace(/[×✕✖*]/g, "x")
+    .replace(/weekly\s*diamond\s*pass|weekly\s*pass|\bwkp\b/g, "wp").replace(/(^|[^\d])([1-9]|10)wp\b/g, "$1wp x $2")     // "2wp" -> "wp x 2"
+    .replace(/(\d)\s*x\s*(?=\d)/g, "$1 x ").replace(/([a-z]{2,6})\s*x\s*(?=\d)/g, "$1 x ").replace(/(^|\s)x\s*(?=\d)/g, "$1x ")
+    .replace(/(\d)([a-z])/g, "$1 $2").replace(/([a-z])(\d)/g, "$1 $2");                                                   // "wp2" -> "wp 2",  "86dia" -> "86 dia"
+  const tk = s.split(Q_SPLIT).filter((x) => x && !isFiller(x));
+  const out = []; let cur = [], lead = 0;
+  const close = (q) => { out.push({ tk: cur, qty: q * (lead || 1) }); cur = []; lead = 0; };
+  const times = (i, n) => { while (tk[i + 1] === "x" && /^\d{1,3}$/.test(tk[i + 2] || "")) { n *= Number(tk[i + 2]); i += 2; } return [i, n]; };   // "x2 x3" = 6
+  for (let i = 0; i < tk.length; i++) {
+    const t = tk[i], nx = tk[i + 1];
+    if (t === "x") {
+      if (/^\d{1,3}$/.test(nx || "")) {                     // "x2": quantity of the package before it ...
+        let n; [i, n] = times(i + 1, Number(nx));
+        if (!cur.length || cur.every(isBigNum)) lead = (lead || 1) * n;      // ... or, with only ID / Server before it, of the package after it ("ID x2 86")
+        else close(n);
+      }
+      continue;                                             // a lone "x" means nothing
     }
-    return { rest, qty };
+    if (/^\d{1,2}$/.test(t) && Number(t) >= 1 && Number(t) <= QTY_MAX && nx === "x" && /^\d{1,3}$/.test(tk[i + 2] || "") && Number(tk[i + 2]) > QTY_MAX) {   // "2x86": the small number in front is the quantity
+      if (cur.some((x) => !isBigNum(x))) close(1);                            // "86 2x172": the 86 is finished, the 2 belongs to 172
+      lead = (lead || 1) * Number(t); i++; continue;
+    }
+    cur.push(t);
+    if (/^[a-z]{2,6}$/.test(t) && t !== "dd" && /^\d{1,2}$/.test(nx || "") && (Number(nx) <= QTY_MAX || i + 2 === tk.length) && !(tk[i + 2] === "x" && Number(tk[i + 3]) > QTY_MAX)) {   // "wp 2"  (a bigger number in the middle, "wp 86 172", is a package; at the very end it is a too-big quantity and is refused)
+      let n; [i, n] = times(i + 1, Number(nx)); close(n); continue;
+    }
+    if (lead && /^\d+$/.test(t) && !isBigNum(t) && nx !== "dd") close(1);   // "x2 86 172": the quantity in front belongs to the very next amount only
   }
-  m = s.match(/^x\s*(\d{1,3})\s+(\S.*)$/);               // "x2 86"
-  if (m) return { rest: m[2], qty: Number(m[1]) };
-  return { rest: s, qty: 1 };
+  if (cur.length || lead || !out.length) close(1);
+  return out;
 }
 function parseBuyLine(line, aliases, prev) {             // -> { g, pid, segs:[{tk,qty}] } | null (not an order)
-  let t = String(line).toLowerCase().replace(/[×✕✖*]/g, "x").trim();
-  t = t.replace(/(\d{1,4})\s*\+\s*(?:\d{1,4})?(?=\s|$|&|\/|x\d)/g, "$1 dd");   // "50+" (double diamond) -> "50 dd"
+  let t = mmDigits(line).toLowerCase().replace(/[×✕✖*]/g, "x").trim();
+  t = t.replace(/(\d{1,4})\s*\+\s*(?:\d{1,4})?(?=\s|$|&|\/|x\s*\d)/g, "$1 dd");   // "50+" (double diamond) -> "50 dd"
   const m = t.match(/^([\p{L}\p{N}_.-]+)\s+([\s\S]+)$/u);
   let g;
   if (m && aliases.has(m[1])) { g = aliases.get(m[1]); t = m[2]; } else if (prev) g = prev; else return null;
-  const segs = t.split(/\s*[&\/]\s*/).map((x) => {        // packages are separated by "/" (or "&")
-    const r = takeQty(x);
-    let qty = r.qty;
-    const tk = r.rest.split(Q_SPLIT).filter(Boolean), n = tk.length;
-    if (n) {                                               // "wp2" / "wp 2" = 2 weekly passes  (with x: "wp2x3" = 6)
-      const g = tk[n - 1].match(/^([a-z]{2,6})(\d{1,2})$/);
-      if (g && g[1] !== "dd") { tk[n - 1] = g[1]; qty *= Number(g[2]); }
-      else if (n >= 2 && /^\d{1,2}$/.test(tk[n - 1]) && /^[a-z]{2,6}$/.test(tk[n - 2]) && tk[n - 2] !== "dd") { qty *= Number(tk.pop()); }
-    }
-    return { tk, qty };
-  });
+  const segs = t.split(/\s*[&\/]\s*/).flatMap((x) => readQtySeg(x));      // packages are separated by "/" (or "&"), a quantity can also split them
+  if (!segs.length) return null;
   const i = segs[0].tk.findIndex((x) => /^\d{5,14}$/.test(x) && !/^09\d{7,9}$/.test(x));
   if (i < 0) return null;
   const pid = segs[0].tk[i];
   segs[0].tk = segs[0].tk.filter((_, j) => j !== i);
   return { g, pid, segs };
 }
-function multiHits(g, pid, rest) {                       // "86 172 wp" -> one hit per word; every word must match exactly ONE package, else null
+function lev(a, b) {                                     // edit distance (a swapped pair counts as 1: "68" -> "86")
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+  }
+  return d[a.length][b.length];
+}
+function splitSrv(g, rest) {                             // game with a server: "13678 86" -> { srv: "13678", words: ["86"] }
   const srv = g.entries.some((e) => reqOf(e).needsServer) && rest.length > 1 && /^\d+$/.test(rest[0]) ? rest[0] : "";
-  const words = srv ? rest.slice(1) : rest;
+  return { srv, words: srv ? rest.slice(1) : rest };
+}
+function badWords(g, rest) {                             // which typed words match no package at all
+  return splitSrv(g, rest).words.filter((w) => w !== "x" && !isBigNum(w) && !quickMatches([g], { id: "0", rest: [w] }).length);
+}
+function nearAmounts(g, bad) {                           // "85" -> ["86 Diamonds"],  "wpp" -> ["Weekly Pass"]  (at most 3, closest first)
+  const seen = new Set(), scored = [];
+  for (const e of g.entries) for (const p of e.packages) {
+    const amount = String(p.amount ?? "");
+    if (!amount || seen.has(amount)) continue;
+    seen.add(amount);
+    const toks = [...new Set([...amtTokens(amount), pkgInit(amount), ...amount.toLowerCase().split(Q_SPLIT)])].filter((x) => x && x.length >= 2);
+    let best = 9;
+    for (const w of bad) if (w.length >= 2) { const lim = w.length <= 4 ? 1 : 2; for (const t of toks) { const d = lev(w, t); if (d <= lim && d < best) best = d; } }
+    if (best < 9) scored.push({ amount, best });
+  }
+  return scored.sort((a, b) => a.best - b.best).slice(0, 3).map((x) => x.amount);
+}
+function multiHits(g, pid, rest) {                       // "86 172 wp" -> one hit per word; every word must match exactly ONE package, else null
+  const { srv, words } = splitSrv(g, rest);
   if (words.length < 2) return null;
   const out = [];
   for (const w of words) {
@@ -1451,7 +1460,7 @@ function batchLines(units) {                              // the batch card list
   return rows.join("\n") + (by.size > 12 ? `\n… +${by.size - 12}` : "");
 }
 async function autoBuy(env, m, inGroup) {                // true = the message was an order (bought or refused with a reason)
-  const uid = m.from?.id, chat = m.chat.id, text = String(m.text || "").trim();
+  const uid = m.from?.id, chat = m.chat.id, text = mmDigits(m.text).trim();
   if (!uid || !text || text.length > 800 || text.startsWith("/")) return false;
   const store = await loadStore(env);
   if (!store.groups) return false;
@@ -1472,7 +1481,7 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
   if (await KV.get(dk).catch(() => null)) return true;
   await KV.put(dk, "1", { expirationTtl: 3600 }).catch(() => {});
   const errs = [], units = [];
-  const fail = (line, msg) => errs.push({ line, msg });
+  const fail = (line, msg, bad = "", near = []) => errs.push({ line, msg, bad, near });
   if (lines.length > BATCH_MAX) fail("-", `တစ်ခါပို့ရင် စာကြောင်း ${BATCH_MAX} ကြောင်းထိပဲ`);
   let prev = null;
   for (const ln of lines.slice(0, BATCH_MAX)) {
@@ -1487,7 +1496,12 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
       if (!rest.length) { fail(ln, "Package မပါပါ"); continue; }
       const base = quickMatches([p.g], { id: p.pid, rest });
       const hl = base.length === 1 ? base : base.length ? null : multiHits(p.g, p.pid, rest);   // "86 172 wp" typed with spaces = three packages
-      if (!hl) { fail(ln, base.length ? `Package ${base.length} ခု ကိုက်နေ — ပိုတိကျအောင် ရေးပါ (သို့ 🛒 ခလုတ်သုံးပါ)` : "Package မတွေ့ပါ — ရတာ: " + [...new Set(p.g.entries.flatMap((e) => e.packages.map((x) => String(x.amount ?? "")).filter(Boolean)))].slice(0, 14).join(" · ")); continue; }
+      if (!hl) {
+        const bad = base.length ? [] : badWords(p.g, rest);
+        fail(ln, base.length ? `Package ${base.length} ခု ကိုက်နေ — ပိုတိကျအောင် ရေးပါ (သို့ 🛒 ခလုတ်သုံးပါ)` : "Package မတွေ့ပါ — ရတာ: " + [...new Set(p.g.entries.flatMap((e) => e.packages.map((x) => String(x.amount ?? "")).filter(Boolean)))].slice(0, 14).join(" · "), bad.join(" "), bad.length ? nearAmounts(p.g, bad) : []);
+        continue;
+      }
+      if (hl.length > 1 && sg.qty > 1) { fail(ln, "အရေအတွက်က Package များစွာထဲက ဘယ်ဟာအတွက်လဲ မသိပါ — ခွဲရေးပါ: 86x2 172  ·  86/172x2  ·  172/wp2", ""); continue; }   // never guess whose quantity it is
       if (k === 0) sid = hl[0].sid;
       for (const h of hl) {
         const entry = h.group.entries[h.ei], pkg = entry.packages[h.pi], rq = reqOf(entry), pv = providerOf(entry, pkg);
@@ -1522,10 +1536,42 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
   }
   const rt = replyTo(m.message_id);
   if (errs.length) {
-    const r = await send(env, chat, "<b>✗ မဝယ်ရသေးပါ</b> — ဘာမှ မဖြတ်ရသေးပါ\n" + LINE + "\n" + errs.map((e) => `<code>${esc(cut(e.line, 60))}</code>\n${esc(e.msg)}`).join("\n\n") + "\n" + LINE + "\nပြင်ပြီး ပြန်ပို့ပါ", rt);
+    const r = await send(env, chat, "<b>✗ မဝယ်ရသေးပါ</b> — ဘာမှ မဖြတ်ရသေးပါ\n" + LINE + "\n" + errs.map((e) => `<code>${esc(cut(e.line, 60))}</code>\n${e.bad ? `❓ <code>${esc(cut(e.bad, 30))}</code> — ` : ""}${esc(e.msg)}${e.near && e.near.length ? "\n💡 " + e.near.map((x) => `<code>${esc(x)}</code>`).join(" · ") + " လား?" : ""}`).join("\n\n") + "\n" + LINE + "\nပြင်ပြီး ပြန်ပို့ပါ", rt);
     if (inGroup) await scheduleDelete(env, chat, r?.result?.message_id, 90 * 1000);
     return true;
   }
+  const total = units.reduce((n, u) => n + (Number(u.pkg.price) || 0), 0), why = await needConfirm(env, units, total);
+  if (why.length) return askConfirm(env, m, inGroup, units, total, why);      // big / risky batch: nothing is bought until ✅ is tapped
+  return runBatch(env, m, inGroup, units);
+}
+const confirmLimit = (env) => (String(env.CONFIRM_MMK ?? "").trim() !== "" && Number.isFinite(Number(env.CONFIRM_MMK)) ? Number(env.CONFIRM_MMK) : CONFIRM_DEFAULT);   // env.CONFIRM_MMK = 0 -> never ask
+async function needConfirm(env, units, total) {          // -> [reason lines]  (empty = buy at once)
+  const why = [], lim = confirmLimit(env);
+  if (!KV) return why;
+  if (lim > 0 && total > lim) why.push(`💰 စုစုပေါင်း ${fmt(total)} Ks — ${fmt(lim)} Ks ထက် များနေပါတယ်`);
+  const rate = Number(env.MMK_PER_USD);                  // optional: lets the bot compare the batch with the API balance
+  if (rate > 0) {
+    const g2 = units.filter((u) => /^(g2bulk|voucher)$/.test(u.pv.key)).reduce((n, u) => n + (Number(u.pkg.price) || 0), 0);
+    if (g2 > 0) { const b = await g2Balance(env); if (b !== null && g2 / rate > b) why.push(`⚠ API Balance ${b.toFixed(2)} USD — ရောင်းဈေးအရ ≈ ${(g2 / rate).toFixed(2)} USD လိုနိုင်ပါတယ် (ဝယ်ရင်းက ပိုနည်းနိုင်)`); }
+  }
+  return why;
+}
+async function askConfirm(env, m, inGroup, units, total, why, opts = {}) {
+  const tok = Math.random().toString(36).slice(2, 10), cnt = new Map(), f = m.from || {};
+  for (const u of units) cnt.set(u, (cnt.get(u) || 0) + 1);
+  const rec = {
+    m: { id: m.message_id, title: String(m.chat.title || ""), from: { id: f.id, first_name: f.first_name, last_name: f.last_name, username: f.username } }, rep: !!opts.rep, total,
+    items: [...cnt].map(([u, n]) => ({ gid: u.group.id, eid: u.entry.id, pi: u.entry.packages.indexOf(u.pkg), n, line: u.line, pid: u.pid, sid: u.sid, sname: u.sname, pname: u.pname })),
+  };
+  await KV.put("bc:" + tok, JSON.stringify(rec), { expirationTtl: 600 }).catch(() => {});
+  const ids = [...new Map(units.map((u) => [u.pid + "|" + u.sid, u])).values()].slice(0, 6).map((u) => `🆔 <code>${esc(u.pid)}</code>${u.sid ? ` · <code>${esc(u.sid)}</code>` : ""}${u.pname ? " — " + esc(u.pname) : ""}`);
+  const r = await send(env, m.chat.id, `<b>${opts.rep ? "🔁 ထပ်ဝယ်မလား" : "⚠️ အတည်ပြုပါ"}</b>\n${LINE}\n${batchLines(units)}\n${LINE}\n${ids.join("\n")}\n${LINE}\n<code>Total  </code> <b>${fmt(total)} MMK</b>` + (why.length ? "\n\n" + why.join("\n") : ""),
+    { reply_markup: { inline_keyboard: [[btn("✅ ဝယ်မယ်", "zbc:" + tok, "success"), btn("❌ မဝယ်ဘူး", "zbx:" + tok, "danger")]] }, disable_web_page_preview: true, ...(opts.rep ? {} : replyTo(m.message_id)) });
+  if (inGroup) await scheduleDelete(env, m.chat.id, r?.result?.message_id, 10 * 60 * 1000);
+  return true;
+}
+async function runBatch(env, m, inGroup, units) {         // the checked units are bought now
+  const uid = m.from?.id, chat = m.chat.id, rt = replyTo(m.message_id);
   const bal = units.some((u) => /^(g2bulk|voucher)$/.test(u.pv.key)) ? await g2Balance(env) : null;
   if (bal !== null && bal <= 0) { await send(env, chat, `<b>✗ မဝယ်ရသေးပါ</b>\nAPI Balance မရှိတော့ပါ (<code>${bal.toFixed(2)} USD</code>) — အရင်ဖြည့်ပါ`, rt); return true; }
   const f = m.from, by = [f.first_name, f.last_name].filter(Boolean).join(" ") || f.username || String(uid);
@@ -1611,7 +1657,7 @@ async function statusData(env, entry, pid, sid, raw) {
 }
 async function statusCard(env, m, inGroup, g, pid, sidArg) {   // always true: the message was handled
   const chat = m.chat.id, rt = replyTo(m.message_id);
-  const out = async (text, extra = {}) => { const r = await send(env, chat, text, { ...rt, disable_web_page_preview: true, ...extra }); if (inGroup) await scheduleDelete(env, chat, r?.result?.message_id, QUOTE_MS); return r; };
+  const out = async (text, extra = {}) => { const r = await send(env, chat, text, { ...rt, disable_web_page_preview: true, ...extra }); if (inGroup) await scheduleDelete(env, chat, r?.result?.message_id, quoteMs(env)); return r; };
   const entry = g.entries.find((e) => e.f.idCheck) || g.entries[0], rq = reqOf(entry);
   if (rq.needsServer && !sidArg) { await out("<b>Server ID မပါပါ</b>\nဥပမာ — <code>ml " + esc(pid) + " 2001</code>"); return true; }
   if (!rq.needsServer && sidArg) { await out("<b>Package မတွေ့ပါ</b> — ရတာ: " + esc([...new Set(g.entries.flatMap((e) => e.packages.map((x) => String(x.amount ?? "")).filter(Boolean)))].slice(0, 14).join(" · "))); return true; }
@@ -1673,7 +1719,7 @@ async function groupAdminText(env, m) {                 // admin REPLIES to the 
 
 
 /* ----- admin price quote in a group: type amounts / package names (86, wp, wp 2, 86 172 wp) or a tab name (diamond, pass) ----- */
-const QUOTE_MS = 5 * 60 * 1000;                         // quotes disappear after 5 minutes
+const quoteMs = (env) => { const n = Number(env.QUOTE_MIN); return (n > 0 && n <= 120 ? n : 5) * 60 * 1000; };   // quotes disappear after 5 minutes (env.QUOTE_MIN = 1..120 to change)
 const MAX_QTY = QTY_MAX;                                // one limit for quotes and orders
 const Q_STOP = /ဈေးနှုန်း|ဈေး|ဘယ်လောက်|ကျပ်|ပေးပါ|ပေး|လဲ|လား|\b(?:price|prices|rate|mmk|ks|kyat|pls|please)\b/gi;
 const isFiller = (x) => x !== "x" && Q_FILLER.has(x);
@@ -1699,27 +1745,24 @@ function tabMatches(pool, text) {                       // the whole message is 
   const seen = new Set();
   return (exact.length ? exact : loose).filter((h) => { const k = h.group.id + "|" + h.entry.id + "|" + h.tab.key; if (seen.has(k)) return false; seen.add(k); return true; });
 }
-function quoteItems(text) {                             // "86 172 wp 2 x3" -> [{86},{172},{wp qty 2}]   (same ×N rules as takeQty: 86x2 · x2 86 · 2x86 · wpx2)
-  const tk = quoteTokens(text, false).filter((x) => !isFiller(x));
+function quoteItems(text) {                             // "86x2 172 wp 2" -> [{86 ×2},{172},{wp ×2}]   — the SAME reader as the orders (readQtySeg), so a quote shows exactly what the order would charge
   const items = [];
-  let pend = 0;                                          // a quantity typed BEFORE its package ("x2 86" / "2x86") waits for the next one
-  const cap = (it, n) => { it.over = n > MAX_QTY; it.qty = Math.min(Math.max(1, n), MAX_QTY); };
-  const put = (it) => { if (pend) { cap(it, pend); pend = 0; } items.push(it); };
-  for (let i = 0; i < tk.length; i++) {
-    const t = tk[i], last = items[items.length - 1];
-    if (t === "x") {
-      if (/^\d+$/.test(tk[i + 1] || "")) { const n = Number(tk[++i]); if (last) cap(last, n); else pend = n; }
-      continue;
+  for (const sg of mmDigits(text).toLowerCase().replace(Q_STOP, " ").split(/\s*[&\/]\s*/).flatMap((x) => readQtySeg(x))) {
+    const part = [];
+    for (const t of sg.tk) {
+      const last = part[part.length - 1];
+      if (/^\d+$/.test(t)) part.push({ toks: [t], num: true, text: t });
+      else if (last && !last.num) { last.toks.push(t); last.text += " " + t; }          // "twilight pass" = one name
+      else part.push({ toks: [t], num: false, text: t });
     }
-    if (/^\d+$/.test(t)) {
-      const n = Number(t);
-      if (n >= 1 && n <= MAX_QTY && tk[i + 1] === "x" && /^\d+$/.test(tk[i + 2] || "") && Number(tk[i + 2]) > MAX_QTY) { pend = n; i++; continue; }   // "2x86" = 2 × 86
-      if (last && !last.num && !last.qty && n >= 1 && n <= MAX_QTY) { last.qty = n; continue; }   // "wp 2" = 2 weekly passes
-      put({ toks: [t], num: true, qty: 0, text: t });
-    } else if (last && !last.num && !last.qty) { last.toks.push(t); last.text += " " + t; }          // "twilight pass" = one name
-    else put({ toks: [t], num: false, qty: 0, text });
+    for (const it of part) {
+      it.over = sg.qty > MAX_QTY;
+      it.qty = sg.qty > 1 ? Math.min(sg.qty, MAX_QTY) : 0;
+      it.amb = sg.qty > 1 && part.length > 1;           // "86 172 x2": whose x2?  never guessed
+      if (!it.num) it.text = it.toks.join(" ");
+      items.push(it);
+    }
   }
-  items.forEach((it) => { if (!it.num) it.text = it.toks.join(" "); });
   return items;
 }
 function resolveItem(pool, it) {
@@ -1791,7 +1834,7 @@ async function allGroupGames(env) {                     // every game that is se
   return s;
 }
 async function priceQuote(env, m, priv) {               // true = answered.  priv = the admin typed it in the bot's private chat
-  const chat = m.chat.id, text = String(m.text || "").trim();
+  const chat = m.chat.id, text = mmDigits(m.text).trim();
   if (!text || text.length > 120 || text.startsWith("/")) return false;
   if (/\d{8,}/.test(text.replace(/[\s,.\-]/g, ""))) return false;          // a Player ID / phone number in the message = an order line, never a price question
   const store = await loadStore(env);
@@ -1804,7 +1847,7 @@ async function priceQuote(env, m, priv) {               // true = answered.  pri
   if (tm.length) {                                      // a tab name: that tab's bordered table
     for (const h of tm) {
       const ids = await sendTable(env, chat, m.message_id, h.group, h.entry, h.tab.label, h.tab.rows);
-      for (const id of ids) await scheduleDelete(env, chat, id, QUOTE_MS);
+      for (const id of ids) await scheduleDelete(env, chat, id, quoteMs(env));
     }
     return true;
   }
@@ -1813,11 +1856,16 @@ async function priceQuote(env, m, priv) {               // true = answered.  pri
   const q = quoteHtml(pool, items);
   if (!q.found) return false;
   if (q.warn.some((w) => w.num !== true)) return false;   // other words in the message = normal chat, not a quote
+  if (items.some((i) => i.amb)) {                         // "86 172 x2": the quote must never differ from what the order would charge, so it asks instead of guessing
+    const r = await send(env, chat, "⚠️ <b>အရေအတွက်က ဘယ် package အတွက်လဲ မသိပါ</b>\nခွဲရေးပါ — <code>86x2 172</code> · <code>86/172x2</code> · <code>172/wp2</code>", replyTo(m.message_id));
+    await scheduleDelete(env, chat, r?.result?.message_id, 60 * 1000);
+    return true;
+  }
   let out = q.html;
   if (q.warn.length) out += `\n⚠️ မတွေ့ပါ: ${q.warn.map((w) => `<code>${esc(w.text)}</code>`).join(" ")}`;
   if (items.some((i) => i.over)) out += `\n⚠️ တစ်ခုကို အများဆုံး ${MAX_QTY} ခုပါ`;
   const r = await send(env, chat, out, replyTo(m.message_id));
-  await scheduleDelete(env, chat, r?.result?.message_id, QUOTE_MS);
+  await scheduleDelete(env, chat, r?.result?.message_id, quoteMs(env));
   return true;
 }
 
@@ -1941,7 +1989,7 @@ function orderMarkup(o) {
   else if (o.status === "failed") rows.push([btn(T.b_fail, "nop", "danger")]);
   else if (o.status === "unknown") rows.push([btn(T.b_unk, "nop")]);
   else rows.push([btn(T.b_proc, "nop"), btn(T.b_check, `zr:${o.id}`, "primary")]);
-  if (o.status !== "processing") rows.push([btn(T.b_again, "zn", "primary")]);
+  if (o.status !== "processing") rows.push([btn(T.b_again, "zn", "primary"), ...(o.status === "completed" && !o.cname ? [btn("🔁 ထပ်ဝယ်", `zrb:${o.id}`)] : [])]);
   return { inline_keyboard: rows };
 }
 // KV SAVING: o.fo / o.fr = "the open: / ref: key already exists", o.odS = status last written to the daily report.
@@ -2109,6 +2157,46 @@ async function onAdminCallback(q, env) {
     const r = await send(env, chat, "📩 Bot ကို private မှာ <b>Start</b> အရင်နှိပ်ပါ", { reply_markup: { inline_keyboard: [[{ text: "▶️ Bot ကို Start", url: `https://t.me/${await botName(env)}?start=admin` }]] } });
     return scheduleDelete(env, chat, r?.result?.message_id, 30 * 1000);
   }
+  if (tag === "zbx") {                                    // big batch: ❌
+    await ans(); await KV.delete("bc:" + p[1]).catch(() => {});
+    return tg(env, "editMessageText", { chat_id: chat, message_id: mid, text: "❌ ပယ်ဖျက်ပြီးပါပြီ — ဘာမှ မဝယ်ရပါ", reply_markup: { inline_keyboard: [] } }).catch(() => {});
+  }
+  if (tag === "zbc") {                                    // big batch / repeat: ✅
+    const rec = await KV.get("bc:" + p[1], "json").catch(() => null);
+    const gone = (text) => tg(env, "editMessageText", { chat_id: chat, message_id: mid, text, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    if (!rec) { await ans("⌛ ကြာသွားပါပြီ — ပြန်ပို့ပါ", true); return gone("⌛ ကြာသွားပါပြီ — ဘာမှ မဝယ်ရပါ · ပြန်ပို့ပါ"); }
+    if (await KV.get("bcd:" + p[1]).catch(() => null)) return ans("⏳ ဝယ်နေပါပြီ", true);
+    const store = await loadStore(env);
+    if (!store.groups) return ans("Store data မရနိုင်သေးပါ — ခဏနေ ပြန်နှိပ်ပါ", true);
+    await KV.put("bcd:" + p[1], "1", { expirationTtl: 3600 }).catch(() => {});      // a second tap finds it already taken
+    await KV.delete("bc:" + p[1]).catch(() => {});
+    const units = [];
+    for (const it of rec.items) {
+      const group = store.byId.get(it.gid), entry = group && group.entries.find((e) => e.id === it.eid), pkg = entry && entry.packages[it.pi], pv = pkg && providerOf(entry, pkg);
+      if (!pkg || !pv.ok || !keyReady(env, pv)) { await ans("Package / Provider ပြောင်းသွားပါပြီ", true); return gone("✗ Package / Provider ပြောင်းသွားပါပြီ — ဘာမှ မဝယ်ရပါ · ပြန်ပို့ပါ"); }
+      const u = { line: it.line, group, entry, pkg, pv, pid: it.pid, sid: it.sid, sname: it.sname, pname: it.pname };
+      for (let n = 0; n < it.n; n++) units.push(u);
+    }
+    if (units.reduce((n, u) => n + (Number(u.pkg.price) || 0), 0) !== rec.total) { await ans("ဈေးပြောင်းသွားပါပြီ", true); return gone("✗ ဈေးပြောင်းသွားပါပြီ — ဘာမှ မဝယ်ရပါ · ပြန်ပို့ပါ"); }
+    await ans("⏳ ဝယ်နေပါတယ်");
+    await gone("⏳ <b>ဝယ်နေပါတယ်...</b>");
+    await runBatch(env, { message_id: rec.rep ? mid : rec.m.id, chat: { id: chat, title: rec.m.title }, from: rec.rep ? q.from : rec.m.from }, q.message.chat.type !== "private", units);
+    return delMsg(env, chat, mid);
+  }
+  if (tag === "zrb") {                                    // 🔁 the same order again (always asks first)
+    const o = await KV.get("or:" + p[1], "json").catch(() => null);
+    if (!o) return ans("Order မတွေ့ပါ", true);
+    const store = await loadStore(env);
+    if (!store.groups) return ans("Store data မရနိုင်သေးပါ", true);
+    const group = store.groups.find((g) => g.name === o.game), entry = group && group.entries.find((e) => (e.server || "") === (o.server || "")), pkg = entry && entry.packages.find((x) => String(x.amount ?? "-") === o.amount);
+    if (!pkg) return ans("Package မတွေ့တော့ပါ", true);
+    const pv = providerOf(entry, pkg), rq = reqOf(entry);
+    if (!pv.ok || !keyReady(env, pv)) return ans(pv.why || "Provider key မထည့်ရသေးပါ", true);
+    if (rq.needsChar || o.cname) return ans("Character Name လိုတဲ့ game — 🛒 ခလုတ်နဲ့ ဝယ်ပါ", true);
+    if (rq.needsServer && !o.sid) return ans("Server ID မပါပါ", true);
+    await ans();
+    return askConfirm(env, { message_id: 0, chat: q.message.chat, from: q.from }, q.message.chat.type !== "private", [{ line: "🔁", group, entry, pkg, pv, pid: o.pid, sid: o.sid || "", sname: o.sname || "", pname: o.pname || "" }], Number(pkg.price) || 0, ["🔁 ယခင် Order ကို ထပ်ဝယ်ခြင်း"], { rep: true });
+  }
   let ss = await getSS(uid);
   if (!ss && tag === "zl") ss = { step: "list", src: "" };
   if (!ss) return ans("Session ကုန်သွားပါပြီ — 🛒 ဝယ်ယူရန် ကို ပြန်နှိပ်ပါ", true);
@@ -2151,14 +2239,6 @@ async function onAdminCallback(q, env) {
     return save();
   }
   if (tag === "zw") { await ans(); ss.spage = Number(p[1]) || 0; await show(env, chat, ss, srvSelectView(ss)); return save(); }
-  if (tag === "zk") {                                  // quick order matched several: the admin picked one
-    const c = ss.step === "pickq" && (ss.cands || [])[Number(p[1])];
-    if (!c || !store.byId.get(c.gid)) return ans("Session ကုန်သွားပါပြီ — ID + amount ပြန်ပို့ပါ", true);
-    await ans();
-    ss.gid = c.gid; ss.ei = c.ei; ss.tab = 0; ss.page = 0;
-    await pickPackage(env, chat, ss, store, c.pi, { pid: ss.qpid, sid: c.sid });
-    return save();
-  }
   if (tag === "zi") {
     await ans(); ss.pid = ""; ss.sid = ""; ss.sname = ""; ss.cname = ""; ss.pname = ""; ss.err = ""; ss.warn = "";
     await advance(env, chat, ss, store);
