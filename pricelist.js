@@ -589,12 +589,7 @@ async function sendTable(env, chat, reply, group, entry, label, rows) {
       label: esc(label), part: chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "",
     });
     const cap = htmlToText(html);
-    const blocks = [rbTable(head, chunks[i])];
-    if (plain) blocks.unshift(rbPara(cap));
-    else {
-      const h = await send(env, chat, html, { ...replyTo(reply), disable_web_page_preview: true }).catch(() => null);
-      if (h?.result?.message_id) ids.push(h.result.message_id);
-    }
+    const blocks = [rbPara(cap), rbTable(head, chunks[i])];   // header + table always ONE message, so deleting it removes everything together
     let r = await tg(env, "sendRichMessage", { chat_id: chat, rich_message: { blocks }, ...replyTo(reply) }).catch(() => null);
     if (!r?.ok) {                                   // fallback: monospace box table (split small enough for one message)
       const part = chunks[i];
@@ -683,8 +678,25 @@ function priceView(group, ei, ti, pg, o) {                // o: { pre: callback 
     label: esc(tab.label), part: pages > 1 ? ` (${pg + 1}/${pages})` : "",
   });
   const head = isPlainTpl(tplNow().ptable) ? `<b>${esc(htmlToText(html))}</b>` : html;
-  const table = boxTable(["Package", "Price (MMK)"], tab.rows.slice(pg * PV_ROWS, pg * PV_ROWS + PV_ROWS));
-  return { text: `${head}\n<pre>${esc(table)}</pre>`, markup: { inline_keyboard: rows } };
+  const part = tab.rows.slice(pg * PV_ROWS, pg * PV_ROWS + PV_ROWS);
+  const table = boxTable(["Package", "Price (MMK)"], part);
+  const rich = [rbPara(htmlToText(html)), rbTable(["Package", "Price (MMK)"], part), ...rows.map((r) => ({ type: "buttons", buttons: r }))];   // table + buttons = one message
+  return { text: `${head}\n<pre>${esc(table)}</pre>`, markup: { inline_keyboard: rows }, rich };
+}
+// A view that carries "rich" is sent / edited as a rich message (bordered table, buttons inside it); if Telegram refuses, the old text + inline keyboard is used.
+async function sendView(env, chat, v, extra = {}) {
+  if (v.rich) {
+    const r = await tg(env, "sendRichMessage", { chat_id: chat, rich_message: { blocks: v.rich }, ...extra }).catch(() => null);
+    if (r?.ok) return r;
+  }
+  return send(env, chat, v.text, { reply_markup: v.markup, disable_web_page_preview: true, ...extra });
+}
+async function editView(env, chat, mid, v) {
+  if (v.rich) {
+    const r = await tg(env, "editMessageText", { chat_id: chat, message_id: mid, rich_message: { blocks: v.rich } }).catch(() => null);
+    if (r?.ok || /not modified/i.test(r?.description || "")) return r;
+  }
+  return tg(env, "editMessageText", { chat_id: chat, message_id: mid, text: v.text, parse_mode: "HTML", reply_markup: v.markup, disable_web_page_preview: true }).catch(() => null);
 }
 function groupBack(store, allowed, group) {               // where ⬅️ goes from a price view in a group (none when there is nowhere to go)
   if (group.entries.length > 1) return `g:${group.id}`;
@@ -768,7 +780,7 @@ async function onGroupMessage(m, env) {
   if (mine.length === 1) {                          // only one game: no game menu — the tab buttons (or the server buttons) come straight away
     const g = mine[0];
     const v = g.entries.length === 1 ? priceView(g, 0, 0, 0, { pre: "p" }) : srvPickView(g, { pre: "s" });
-    const r1 = await send(env, chat, v.text, { ...replyTo(m.message_id), reply_markup: v.markup, disable_web_page_preview: true });
+    const r1 = await sendView(env, chat, v, replyTo(m.message_id));
     return scheduleDelete(env, chat, r1?.result?.message_id, g.entries.length === 1 ? priceMs(env) : menuMs(env));
   }
   const r = await send(env, chat, view.text, { ...replyTo(m.message_id), reply_markup: view.markup });
@@ -797,7 +809,7 @@ async function onGroupCallback(q, env) {
     if (!group || !allowed.includes(group.key)) { await ans("ဒီ Game မရနိုင်တော့ပါ"); return; }
     await ans();
     const v = priceView(group, Number(b) || 0, Number(c) || 0, Number(d) || 0, { pre: "p", back: groupBack(store, allowed, group) });
-    return edit(v.text, v.markup);
+    return editView(env, chat, mid, v);
   }
   if (tag === "g" || tag === "s") {
     const group = store.byId.get(a);
@@ -812,7 +824,7 @@ async function onGroupCallback(q, env) {
     await ans();
     const v = priceView(group, ei, 0, 0, { pre: "p", back: groupBack(store, allowed, group) });
     await scheduleDelete(env, chat, mid, priceMs(env));      // same message turns into the price view (no new message)
-    return edit(v.text, v.markup);
+    return editView(env, chat, mid, v);
   }
   return ans();
 }
@@ -2354,7 +2366,7 @@ async function onAdminCallback(q, env) {
     if (!group) { await ans("Game မတွေ့တော့ပါ"); return; }
     await ans(tag === "zvu" ? "🔄 Update လုပ်ပြီးပါပြီ" : "");
     const v = priceView(group, Number(p[2]) || 0, Number(p[3]) || 0, Number(p[4]) || 0, { pre: "zv", update: true, close: "zvx" });
-    return tg(env, "editMessageText", { chat_id: chat, message_id: mid, text: v.text, parse_mode: "HTML", reply_markup: v.markup }).catch(() => {});
+    return editView(env, chat, mid, v);
   }
   if (tag === "zr") { await ans("🔄 စစ်နေပါတယ်"); return refreshOrder(env, p[1]); }
   if (tag === "zn") {
@@ -2732,7 +2744,7 @@ async function onPrivate(m, env) {
         const g = store.groups ? (await abbrMap(store)).get(t.toLowerCase()) : null;
         if (g) {
           const v = g.entries.length > 1 ? srvPickView(g, { pre: "zv", close: "zvx" }) : priceView(g, 0, 0, 0, { pre: "zv", update: true, close: "zvx" });
-          return send(env, chat, v.text, { reply_markup: v.markup, disable_web_page_preview: true });
+          return sendView(env, chat, v);
         }
       }
     }
