@@ -620,6 +620,77 @@ async function sendPrice(env, chat, group, entry, reply) {
   for (const id of ids) await scheduleDelete(env, chat, id, priceMs(env));
 }
 
+/* ---------- Calculator: "1+2" -> 3   (+ - * ÷, brackets, decimals) ---------- */
+function calcText(text) {                                 // -> "1 + 2 = <b>3</b>" | null (not a plain calculation)
+  if (String(text).includes("/")) return null;               // "/" stays the package separator (86/172) — use ÷ to divide
+  const t = mmDigits(text).replace(/[×✕✖]/g, "*").replace(/[÷]/g, "/").replace(/(\d),(?=\d{3}\b)/g, "$1").trim();
+  if (!t || t.length > 80 || !/^[\d\s.+\-*\/()]+$/.test(t) || !/\d\s*[+\-*\/]\s*[\d(]/.test(t.replace(/^\s*-/, ""))) return null;
+  const tk = t.match(/\d+(?:\.\d+)?|[+\-*\/()]/g);
+  if (!tk || tk.join("").length !== t.replace(/\s+/g, "").length) return null;
+  let i = 0;
+  const num = () => {
+    const x = tk[i++];
+    if (x === "(") { const v = add(); if (tk[i++] !== ")") throw 0; return v; }
+    if (x === "-") return -num();
+    if (x === "+") return num();
+    if (x === undefined || !/^\d/.test(x)) throw 0;
+    return Number(x);
+  };
+  const mul = () => { let v = num(); while (tk[i] === "*" || tk[i] === "/") { const o = tk[i++], r = num(); if (o === "/" && r === 0) throw 1; v = o === "*" ? v * r : v / r; } return v; };
+  const add = () => { let v = mul(); while (tk[i] === "+" || tk[i] === "-") { const o = tk[i++], r = mul(); v = o === "+" ? v + r : v - r; } return v; };
+  let v;
+  try { v = add(); if (i !== tk.length) return null; } catch (e) { return e === 1 ? "⚠️ 0 နဲ့ စားလို့မရပါ" : null; }
+  if (!Number.isFinite(v)) return null;
+  v = Math.round(v * 1e8) / 1e8;
+  const shown = tk.join(" ").replace(/\*/g, "×").replace(/\//g, "÷").replace(/\( /g, "(").replace(/ \)/g, ")");
+  return `🧮 ${esc(shown)} = <b>${v.toLocaleString("en-US", { maximumFractionDigits: 8 })}</b>`;
+}
+
+/* ---------- Price view: ONE message, a table for the open tab, the other tabs are buttons ---------- */
+const PV_ROWS = 30;
+function srvPickView(group, o) {                          // several servers: pick one first
+  const pre = o.pre || "s", rows = [];
+  group.entries.forEach((e, i) => {
+    const b = btn(ell(e.server || "Default", 28), pre === "s" ? `s:${group.id}:${i}` : `${pre}:${group.id}:${i}:0:0`, "primary");
+    if (i % 2 === 0) rows.push([b]); else rows[rows.length - 1].push(b);
+  });
+  const last = [];
+  if (o.back) last.push(btn("⬅️ ပြန်သွားရန်", o.back));
+  last.push(btn("❌ ပိတ်", o.close || "x", "danger"));
+  rows.push(last);
+  return { text: `🎮 <b>${esc(group.name)}</b>\nServer ရွေးပါ 👇`, markup: { inline_keyboard: rows } };
+}
+function priceView(group, ei, ti, pg, o) {                // o: { pre: callback tag, back, close, update }
+  o = o || {};
+  const pre = o.pre || "p", entry = group.entries[ei] || group.entries[0];
+  ei = Math.max(0, group.entries.indexOf(entry));
+  const go = (t, n) => `${pre}:${group.id}:${ei}:${t}:${n}`;
+  const bottom = [];
+  if (o.back) bottom.push(btn("⬅️ ပြန်သွားရန်", o.back));
+  if (o.update) bottom.push(btn("🔄 Update", `zvu:${group.id}:${ei}:${ti | 0}:${pg | 0}`, "success"));
+  bottom.push(btn("❌ ပိတ်", o.close || "x", "danger"));
+  const tabs = tabsOf(entry);
+  if (!tabs.length) return { text: `🎮 <b>${esc(group.name)}</b>${entry.server ? " · " + esc(entry.server) : ""}\nPackage မရှိသေးပါ`, markup: { inline_keyboard: [bottom] } };
+  ti = Math.min(Math.max(0, ti | 0), tabs.length - 1);
+  const tab = tabs[ti], pages = Math.max(1, Math.ceil(tab.rows.length / PV_ROWS));
+  pg = Math.min(Math.max(0, pg | 0), pages - 1);
+  const rows = [];
+  if (tabs.length > 1) for (let i = 0; i < tabs.length; i += 3) rows.push(tabs.slice(i, i + 3).map((t, j) => btn(ell(t.label, 20), go(i + j, 0), i + j === ti ? "success" : "primary")));   // tab buttons only when the store has several tabs
+  if (pages > 1) rows.push(pagerRow(pg, pages, (n) => go(ti, n)));
+  rows.push(bottom);
+  const html = tplOut("ptable", {
+    game: esc(group.name), server: esc(entry.server || ""), title: esc(group.name) + (entry.server ? " · " + esc(entry.server) : ""),
+    label: esc(tab.label), part: pages > 1 ? ` (${pg + 1}/${pages})` : "",
+  });
+  const head = isPlainTpl(tplNow().ptable) ? `<b>${esc(htmlToText(html))}</b>` : html;
+  const table = boxTable(["Package", "Price (MMK)"], tab.rows.slice(pg * PV_ROWS, pg * PV_ROWS + PV_ROWS));
+  return { text: `${head}\n<pre>${esc(table)}</pre>`, markup: { inline_keyboard: rows } };
+}
+function groupBack(store, allowed, group) {               // where ⬅️ goes from a price view in a group (none when there is nowhere to go)
+  if (group.entries.length > 1) return `g:${group.id}`;
+  return store.groups.filter((g) => allowed.includes(g.key)).length > 1 ? `m:${group.kind}:0` : null;
+}
+
 /* ---------- Group: menu for the games this group may see ---------- */
 const MAX_GAMES = 2;        // a group may show at most 2 games
 const getAllowed = async (chat) => ((await KV.get("gg:" + chat, "json").catch(() => null)) || []).slice(0, MAX_GAMES);
@@ -671,6 +742,7 @@ async function onGroupMessage(m, env) {
   if (uid && isAdmin(env, uid)) {                   // admin: reply to the bot's card (ID / Character), or type "ID + amount" to order
     if (await groupAdminText(env, m)) return;
     if (/^\/chk(@\w+)?(\s|$)/i.test(text)) { await chkCommand(env, m, true); return; }
+    { const c = calcText(text); if (c) { const r = await send(env, chat, c, replyTo(m.message_id)); await scheduleDelete(env, chat, r?.result?.message_id, quoteMs(env)); return; } }
     if (await autoBuy(env, m, true)) return;
     if (await priceQuote(env, m)) return;
   }
@@ -692,6 +764,13 @@ async function onGroupMessage(m, env) {
     const r = await send(env, chat, "ℹ️ ဒီ Group အတွက် Price List မသတ်မှတ်ရသေးပါ", replyTo(m.message_id));
     return scheduleDelete(env, chat, r?.result?.message_id, 60 * 1000);
   }
+  const mine = store.groups.filter((g) => allowed.includes(g.key));
+  if (mine.length === 1) {                          // only one game: no game menu — the tab buttons (or the server buttons) come straight away
+    const g = mine[0];
+    const v = g.entries.length === 1 ? priceView(g, 0, 0, 0, { pre: "p" }) : srvPickView(g, { pre: "s" });
+    const r1 = await send(env, chat, v.text, { ...replyTo(m.message_id), reply_markup: v.markup, disable_web_page_preview: true });
+    return scheduleDelete(env, chat, r1?.result?.message_id, g.entries.length === 1 ? priceMs(env) : menuMs(env));
+  }
   const r = await send(env, chat, view.text, { ...replyTo(m.message_id), reply_markup: view.markup });
   await scheduleDelete(env, chat, r?.result?.message_id, menuMs(env));
 }
@@ -699,7 +778,7 @@ const SEEN = new Set();
 
 async function onGroupCallback(q, env) {
   const chat = q.message.chat.id, mid = q.message.message_id;
-  const [tag, a, b] = String(q.data).split(":");
+  const [tag, a, b, c, d] = String(q.data).split(":");
   const ans = (text) => tg(env, "answerCallbackQuery", { callback_query_id: q.id, ...(text ? { text, show_alert: false } : {}) });
   if (tag === "nop") return ans();
   if (tag === "x") { await ans(); return tg(env, "deleteMessage", { chat_id: chat, message_id: mid }).catch(() => {}); }
@@ -713,25 +792,27 @@ async function onGroupCallback(q, env) {
     const view = menuView(store, allowed, a, Number(b) || 0);
     return view ? edit(view.text, view.markup) : edit("ℹ️ ဒီ Group အတွက် Price List မသတ်မှတ်ရသေးပါ", { inline_keyboard: [] });
   }
+  if (tag === "p") {                                // a tab / page button of the price view: the same message changes
+    const group = store.byId.get(a);
+    if (!group || !allowed.includes(group.key)) { await ans("ဒီ Game မရနိုင်တော့ပါ"); return; }
+    await ans();
+    const v = priceView(group, Number(b) || 0, Number(c) || 0, Number(d) || 0, { pre: "p", back: groupBack(store, allowed, group) });
+    return edit(v.text, v.markup);
+  }
   if (tag === "g" || tag === "s") {
     const group = store.byId.get(a);
     if (!group || !allowed.includes(group.key)) { await ans("ဒီ Game မရနိုင်တော့ပါ"); return; }
     if (tag === "g" && group.entries.length > 1) {   // several servers: pick the server first
       await ans();
-      const rows = [];
-      group.entries.forEach((e, i) => {
-        const btn = { text: ell(e.server || "Default", 28), callback_data: `s:${group.id}:${i}`, style: "primary" };
-        if (i % 2 === 0) rows.push([btn]); else rows[rows.length - 1].push(btn);
-      });
-      rows.push([{ text: "⬅️ ပြန်သွားရန်", callback_data: `m:${group.kind}:0` }, { text: "❌ ပိတ်", callback_data: "x", style: "danger" }]);
-      return edit(`🎮 <b>${esc(group.name)}</b>\nServer ရွေးပါ 👇`, { inline_keyboard: rows });
+      const v = srvPickView(group, { pre: "s", back: store.groups.filter((g) => allowed.includes(g.key)).length > 1 ? `m:${group.kind}:0` : null });
+      return edit(v.text, v.markup);
     }
-    const entry = group.entries[tag === "s" ? Number(b) || 0 : 0];
-    if (!entry) { await ans("မတွေ့ပါ"); return; }
+    const ei = tag === "s" ? Number(b) || 0 : 0;
+    if (!group.entries[ei]) { await ans("မတွေ့ပါ"); return; }
     await ans();
-    const reply = q.message.reply_to_message?.message_id || 0;
-    await sendPrice(env, chat, group, entry, reply);
-    return tg(env, "deleteMessage", { chat_id: chat, message_id: mid }).catch(() => {});   // the menu has done its job
+    const v = priceView(group, ei, 0, 0, { pre: "p", back: groupBack(store, allowed, group) });
+    await scheduleDelete(env, chat, mid, priceMs(env));      // same message turns into the price view (no new message)
+    return edit(v.text, v.markup);
   }
   return ans();
 }
@@ -856,7 +937,7 @@ function guideView(topic, owner) {
   rows.push([close]);
   return { text: "ℹ️ <b>အကူအညီ</b>\n\nရွေးပါ 👇\n\n<i>အမြန်ဝယ်</i> <code>ml 1159045022 13678 86</code>", markup: { inline_keyboard: rows } };
 }
-const WELCOME = (owner) => "👋 <b>LINN Price List Bot</b>\n" + (owner ? "Owner" : "Admin") + " အနေနဲ့ ဝင်ထားပါတယ်။\n🛒 <code>ml 1159045022 13678 86</code> → တန်းဖြည့်\n🔎 <code>ml 1159045022 13678</code> → ID / Package စစ်\nℹ️ သုံးနည်း → <b>အကူအညီ</b>\n💳 API Balance → ဘေးက <b>≡ menu</b>";
+const WELCOME = (owner) => "👋 <b>LINN Price List Bot</b>\n" + (owner ? "Owner" : "Admin") + " အနေနဲ့ ဝင်ထားပါတယ်။\n🛒 <code>ml 1159045022 13678 86</code> → တန်းဖြည့်\n🔎 <code>ml 1159045022 13678</code> → ID / Package စစ်\n💰 <code>ml</code> → ဈေးစာရင်း (Tab ခလုတ်၊ 🔄 Update)\nℹ️ သုံးနည်း → <b>အကူအညီ</b>\n💳 API Balance → ဘေးက <b>≡ menu</b>";
 async function onGuideCallback(q, env) {
   const chat = q.message.chat.id, mid = q.message.message_id;
   const owner = isOwner(env, q.from.id);
@@ -1282,14 +1363,18 @@ async function adminText(env, m) {                      // admin typed the Playe
 
 
 /* ----- quick order: the admin types "ID + amount"  (123456789 2001 86  /  123456789(2001) wp  /  123456789 wp) ----- */
-const Q_FILLER = new Set(["dia", "dias", "diamond", "diamonds", "dmd", "ဒိုင်ယာ", "x", "pcs", "mmk"]);
+const Q_FILLER = new Set(["dia", "dias", "diamond", "diamonds", "dmd", "ဒိုင်ယာ", "x", "pcs", "mmk", "star", "stars"]);
 const Q_SPLIT = /[^\p{L}\p{M}\p{N}]+/u;
 const mmDigits = (s) => String(s ?? "").replace(/[၀-၉]/g, (c) => String(c.charCodeAt(0) - 0x1040)).replace(/[０-９]/g, (c) => String(c.charCodeAt(0) - 0xFF10));   // ၈၆x၂ -> 86x2  (Myanmar and full-width digits)
+const normUnits = (s) => s                                // "3 Months" / "3mo" / "3 m" -> "3m",  "1 year" -> "12m"  (Telegram Premium 3m / 6m / 12m)
+  .replace(/(\d+)\s*(?:years?|yrs?)\b/g, (_, n) => Number(n) * 12 + "m")
+  .replace(/(\d+)\s*(?:months?|mos?|mths?|m)\b/g, "$1m");
 function amtTokens(s) {                                 // "86 Diamonds" -> ["86"],  "Weekly Pass" / "wp" -> ["wp"],  "2wp" -> ["2","wp"]
   return String(s ?? "").toLowerCase()
     .replace(/^\s*(\d{1,4})\s*\+\s*\d{1,4}/, "$1 dd")                       // double-diamond package "50+50 Diamonds" -> ["50","dd"]  (typed "50+" gives the same)
     .replace(/weekly\s*diamond\s*pass|weekly\s*pass|\bwkp\b/g, "wp")
-    .replace(/(\d)([a-z])/g, "$1 $2").replace(/([a-z])(\d)/g, "$1 $2")
+    .replace(/[\s\S]+/, normUnits)
+    .replace(/(\d)(?!m\b)([a-z])/g, "$1 $2").replace(/([a-z])(\d)/g, "$1 $2")
     .split(Q_SPLIT).filter((x) => x && !Q_FILLER.has(x));
 }
 const pkgInit = (s) => String(s ?? "").toLowerCase().replace(/[^a-z\s]+/g, " ").split(/\s+/).filter((w) => w && !Q_FILLER.has(w)).map((w) => w[0]).join("");   // "Monthly Elite Bundle" -> "meb", "Weekly Pass" -> "wp"
@@ -1302,8 +1387,9 @@ function parseQuick(text) {                             // -> { id, rest[] } or 
   const rest = tk.filter((_, j) => j !== i);
   return rest.length ? { id: tk[i], rest } : null;
 }
+const unitFit = (have, key) => { const nums = have.filter((x) => /^\d+$/.test(x)), words = have.filter((x) => !/^\d+$/.test(x)); return !!words.length && !have.includes("dd") && nums.sort().join(" ") === key; };   // numbers equal, only descriptive words left over
 function quickMatches(pool, pq) {                       // every (game, server, package) whose amount fits what was typed
-  const exact = [], loose = [];
+  const exact = [], unit = [], loose = [];
   for (const group of pool) group.entries.forEach((entry, ei) => {
     const tries = [];
     if (reqOf(entry).needsServer && pq.rest.length > 1 && /^\d+$/.test(pq.rest[0])) tries.push({ sid: pq.rest[0], amt: pq.rest.slice(1) });
@@ -1318,13 +1404,14 @@ function quickMatches(pool, pq) {                       // every (game, server, 
         if (!have.length) return;
         if ([...have].sort().join(" ") === key) { exact.push({ group, ei, pi, sid: tr.sid }); found = true; }
         else if (want.length === 1 && /^[a-z]{2,6}$/.test(want[0]) && pkgInit(p.amount) === want[0]) { exact.push({ group, ei, pi, sid: tr.sid }); found = true; }   // initials: meb = Monthly Elite Bundle
+        else if (numeric && unitFit(have, key)) { unit.push({ group, ei, pi, sid: tr.sid }); found = true; }   // "50" -> "Stars 50" / "50 Stars Pack": the number alone is enough
         else if (!numeric && want.every((x) => have.includes(x))) loose.push({ group, ei, pi, sid: tr.sid });
       });
       if (found) break;
     }
   });
   const seen = new Set();
-  return (exact.length ? exact : loose).filter((h) => { const k = h.group.id + "|" + h.ei + "|" + h.pi; if (seen.has(k)) return false; seen.add(k); return true; });
+  return (exact.length ? exact : unit.length ? unit : loose).filter((h) => { const k = h.group.id + "|" + h.ei + "|" + h.pi; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 /* ----- AUTO BUY: "abbr ID [server] package [xN]"  — Admin only, no Confirm step -----
    ml 1159045022 13678 86            one order
@@ -1416,8 +1503,9 @@ const isBigNum = (x) => /^\d{5,}$/.test(x);               // Player ID / Server 
 function readQtySeg(str) {                               // "86x2 172" -> [{ tk:["86"], qty:2 }, { tk:["172"], qty:1 }]
   const s = String(str).toLowerCase().replace(/[×✕✖*]/g, "x")
     .replace(/weekly\s*diamond\s*pass|weekly\s*pass|\bwkp\b/g, "wp").replace(/(^|[^\d])([1-9]|10)wp\b/g, "$1wp x $2")     // "2wp" -> "wp x 2"
+    .replace(/[\s\S]+/, normUnits)
     .replace(/(\d)\s*x\s*(?=\d)/g, "$1 x ").replace(/([a-z]{2,6})\s*x\s*(?=\d)/g, "$1 x ").replace(/(^|\s)x\s*(?=\d)/g, "$1x ")
-    .replace(/(\d)([a-z])/g, "$1 $2").replace(/([a-z])(\d)/g, "$1 $2");                                                   // "wp2" -> "wp 2",  "86dia" -> "86 dia"
+    .replace(/(\d)(?!m\b)([a-z])/g, "$1 $2").replace(/([a-z])(\d)/g, "$1 $2");                                                   // "wp2" -> "wp 2",  "86dia" -> "86 dia"
   const tk = s.split(Q_SPLIT).filter((x) => x && !isFiller(x));
   const out = []; let cur = [], lead = 0;
   const close = (q) => { out.push({ tk: cur, qty: q * (lead || 1) }); cur = []; lead = 0; };
@@ -1651,6 +1739,7 @@ async function runBatch(env, m, inGroup, units) {         // the checked units a
       await saveOrder(o);
       await renderOrder(env, o);
     }));
+  await fastWatch(env, list.map((x) => x.o)).catch(() => {});      // Processing cards finish by themselves
   if (head?.result?.message_id) {                        // the batch header turns into the result summary
     const n = (st) => list.filter(({ o }) => o.status === st).length, done = n("completed"), bad = n("failed"), unk = n("unknown"), open = list.length - done - bad - unk;
     const paid = list.filter(({ o }) => o.status !== "failed").reduce((t, { o }) => t + (Number(o.price) || 0), 0);
@@ -1821,15 +1910,16 @@ function quoteItems(text) {                             // "86x2 172 wp 2" -> [{
 function resolveItem(pool, it) {
   const find = (toks) => {
     const key = [...toks].sort().join(" "), numeric = toks.every((x) => /^\d+$/.test(x));
-    const exact = [], loose = [];
+    const exact = [], unit = [], loose = [];
     for (const group of pool) group.entries.forEach((entry, ei) => entry.packages.forEach((p, pi) => {
       const have = amtTokens(p.amount);
       if (!have.length) return;
       if ([...have].sort().join(" ") === key) exact.push({ group, ei, pi });
       else if (toks.length === 1 && /^[a-z]{2,6}$/.test(toks[0]) && pkgInit(p.amount) === toks[0]) exact.push({ group, ei, pi });
+      else if (numeric && unitFit(have, key)) unit.push({ group, ei, pi });
       else if (!numeric && toks.every((x) => have.includes(x))) loose.push({ group, ei, pi });
     }));
-    return exact.length ? exact : loose;
+    return exact.length ? exact : unit.length ? unit : loose;
   };
   const r = find(it.toks);
   if (r.length || it.toks.length < 2) return r.length ? r : null;
@@ -2048,7 +2138,46 @@ function orderMarkup(o) {
 // KV SAVING: o.fo / o.fr = "the open: / ref: key already exists", o.odS = status last written to the daily report.
 // So each helper key is written once and deleted once per order (before: rewritten / re-deleted on every save).
 // "placing" orders are tracked by the same open: key (no pend: / pendany keys any more): pollOpenOrders marks a stuck one Unknown.
+/* ---------- Mirror finished bot orders into the store's Firestore `orders` (so the admin dashboard lists them) ----------
+   Needs the Worker secret FIREBASE_SA = the service-account JSON of the Firebase project (Firebase console -> Project settings -> Service accounts).
+   Only Success / Fail are written, never Pending / Processing, so the admin panel can never "Start Processing" (= buy again) a bot order. */
+let ENVX = null, FS_TOK = { v: "", exp: 0 };
+const b64u = (x) => btoa(typeof x === "string" ? x : String.fromCharCode(...new Uint8Array(x))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+async function fsToken(env) {
+  if (FS_TOK.v && Date.now() < FS_TOK.exp - 60000) return FS_TOK.v;
+  const sa = JSON.parse(env.FIREBASE_SA), now = Math.floor(Date.now() / 1000);
+  const head = b64u(JSON.stringify({ alg: "RS256", typ: "JWT" })), body = b64u(JSON.stringify({ iss: sa.client_email, scope: "https://www.googleapis.com/auth/datastore", aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600 }));
+  const der = Uint8Array.from(atob(String(sa.private_key).replace(/-----[A-Z ]+-----|\s/g, "")), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(head + "." + body));
+  const r = await fetch("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "grant_type=" + encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer") + "&assertion=" + head + "." + body + "." + b64u(sig) });
+  const j = await r.json();
+  if (!j.access_token) throw new Error("token");
+  FS_TOK = { v: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
+  return FS_TOK.v;
+}
+async function mirrorOrder(env, o) {                     // true = written
+  if (!env.FIREBASE_SA) return false;
+  const str = (v) => ({ stringValue: String(v ?? "") }), ts = (ms) => ({ timestampValue: new Date(ms).toISOString() });
+  const f = {
+    game: str(o.game), itemAmount: str(o.amount), price: { integerValue: String(Math.round(Number(o.price) || 0)) }, quantity: { integerValue: "1" },
+    status: str(o.status === "completed" ? "Success" : "Fail"), paymentMethod: str("Telegram Bot"), source: str("bot"), botOrder: { booleanValue: true },
+    userName: str(o.by || "Bot"), userId: str("bot:" + o.uid), playerId: str(o.pid), timestamp: ts(o.at || Date.now()), confirmedAt: ts(o.done || Date.now()),
+  };
+  if (o.sid) f.serverId = str(o.sid);
+  if (o.server) f.serverRegion = str(o.server);
+  if (o.pname || o.cname) f.inGameName = str(o.pname || o.cname);
+  if (o.src) f.botSource = str(o.src);
+  if (o.ref) f[o.provider === "fazercard" ? "fazercardOrderId" : "g2bulkOrderId"] = str(o.ref);
+  if (o.status === "failed" && o.error) f.statusNote = str(o.error);
+  if (Array.isArray(o.delivery) && o.delivery.length) f.deliveredCodes = { arrayValue: { values: o.delivery.map((x) => str(x)) } };
+  Object.keys(f).forEach((k) => f[k] === undefined && delete f[k]);
+  const r = await fetch(`${FS_BASE}/orders/bot_${encodeURIComponent(o.id)}`, { method: "PATCH", headers: { authorization: "Bearer " + (await fsToken(env)), "content-type": "application/json" }, body: JSON.stringify({ fields: f }) });
+  if (!r.ok) console.error("mirrorOrder", r.status, (await r.text()).slice(0, 200));
+  return r.ok;
+}
 async function saveOrder(o) {
+  if (ENVX && (o.status === "completed" || o.status === "failed") && o.fsS !== o.status && (await mirrorOrder(ENVX, o).catch((e) => { console.error("mirrorOrder", e); return false; }))) o.fsS = o.status;
   const final = !["processing", "placing"].includes(o.status);
   if (final && !o.done) o.done = Date.now();
   if (o.kv === undefined) { o.kv = 1; o.fo = o.status === "placing" && !o.ref ? 0 : 1; o.fr = 0; }   // an order saved by the old code may already have its open: key
@@ -2145,6 +2274,20 @@ async function refreshOrder(env, id) {
   await saveOrder(o);
   await renderOrder(env, o);
 }
+async function fastWatch(env, orders) {                 // right after buying: look at the provider every few seconds, so the card turns Completed by itself (no 🔄 tap, no waiting for the 1-minute cron)
+  let left = orders.filter((o) => o.status === "processing" && o.ref), calls = 0;
+  const waits = [3000, 4000, 5000, 5000, 6000];          // ~23 s in total, at most 30 provider calls (Worker subrequest limit)
+  for (let n = 0; n < waits.length && left.length && calls < 30; n++) {
+    await new Promise((r) => setTimeout(r, waits[n]));
+    for (const o of left) {
+      if (calls >= 30) break;
+      calls++;
+      const r = await pollOrder(env, o).catch(() => null);
+      if (r) { Object.assign(o, r); await saveOrder(o); await renderOrder(env, o); }
+    }
+    left = left.filter((o) => o.status === "processing");
+  }
+}
 async function pollOpenOrders(env, full) {              // every minute: finish the orders that were still Processing.  full = also balance watch (every 5 min)
   if (!KV) return;
   const oa = await KV.get("openany").catch(() => null);          // time of the newest open order
@@ -2195,6 +2338,7 @@ async function confirmOrderInner(env, chat, uid, ss, store, from) {
   await saveOrder(o);
   await renderOrder(env, o);
   await delSS(uid);
+  await fastWatch(env, [o]).catch(() => {});
 }
 
 /* ----- callbacks (tags start with "z", admin only) ----- */
@@ -2203,6 +2347,15 @@ async function onAdminCallback(q, env) {
   const p = String(q.data).split(":"), tag = p[0];
   const ans = (text, alert) => tg(env, "answerCallbackQuery", { callback_query_id: q.id, ...(text ? { text, show_alert: !!alert } : {}) });
   if (tag === "zq") { await ans(); await delSS(uid); return delMsg(env, chat, mid); }
+  if (tag === "zvx") { await ans(); return delMsg(env, chat, mid); }
+  if (tag === "zv" || tag === "zvu") {                    // price view of one game (typed abbreviation); 🔄 Update = the store is read again, prices too
+    const store = await loadStore(env, tag === "zvu");
+    const group = store.byId && store.byId.get(p[1]);
+    if (!group) { await ans("Game မတွေ့တော့ပါ"); return; }
+    await ans(tag === "zvu" ? "🔄 Update လုပ်ပြီးပါပြီ" : "");
+    const v = priceView(group, Number(p[2]) || 0, Number(p[3]) || 0, Number(p[4]) || 0, { pre: "zv", update: true, close: "zvx" });
+    return tg(env, "editMessageText", { chat_id: chat, message_id: mid, text: v.text, parse_mode: "HTML", reply_markup: v.markup }).catch(() => {});
+  }
   if (tag === "zr") { await ans("🔄 စစ်နေပါတယ်"); return refreshOrder(env, p[1]); }
   if (tag === "zn") {
     await ans();
@@ -2351,16 +2504,14 @@ function kbMenuView() {
 }
 function kbPickView(i) {
   const full = kbList()[i];
-  const rows = [[btn("✏️ စာပြောင်း", "ekt:" + i, "primary"), btn("💎 Emoji ထည့်/ပြောင်း", "ekm:" + i, "primary")]];
+  const rows = [[btn("✏️ စာ / 💎 Emoji ပြင်", "ekt:" + i, "primary")]];
   if (KBI[full] || KBT[full]) rows.push([btn("♻️ ပုံမှန်ပြန်ထား", "ekr:" + i, "danger")]);
   rows.push([btn("⬅️ ခလုတ်များ", "ek")]);
   return { text: "⌨️ <b>" + esc(KBT[full] || full) + "</b>" + (KBT[full] ? "\nမူလ — " + esc(full) : "") + "\n" + (KBI[full] ? "💎 premium emoji ထည့်ထားပါတယ်" : "premium emoji မထည့်ရသေးပါ"), markup: { inline_keyboard: rows } };
 }
 function kbPrompt(i, mode) {
   const full = kbList()[i];
-  const text = mode === "text"
-    ? "✏️ <b>" + esc(KBT[full] || full) + "</b>\n\nခလုတ်ရဲ့ စာအသစ်ကို <b>တစ်ကြောင်းတည်း</b> (စာလုံး " + KBT_MAX + " အထိ) ပို့ပါ။ ပုံမှန် emoji ထည့်လို့ရပါတယ်။\n\nPremium emoji တစ်ခု ထည့်ပို့ရင် ခလုတ်ရဲ့ ဘယ်စွန်းမှာ ပေါ်ပါမယ် (Bot ပိုင်ရှင် account မှာ Telegram Premium ရှိရပါမယ်)"
-    : "💎 <b>" + esc(KBT[full] || full) + "</b>\n\nခလုတ်မှာ ပေါ်စေချင်တဲ့ <b>premium emoji တစ်ခု</b> ကို message တစ်ခုအနေနဲ့ ပို့ပါ (စာမလို၊ emoji သက်သက်ပဲ)\n\nBot ပိုင်ရှင် account မှာ Telegram Premium ရှိမှ premium emoji ပို့လို့ရပါမယ်";
+  const text = "✏️ <b>" + esc(KBT[full] || full) + "</b>\n\nစာ / premium emoji ကို <b>message တစ်ခုတည်း</b> နဲ့ ပို့ပါ (တစ်ကြောင်းတည်း၊ စာလုံး " + KBT_MAX + " အထိ)\n• စာ + premium emoji → နှစ်ခုလုံး ပြောင်း\n• စာသက်သက် → စာပဲ ပြောင်း\n• premium emoji သက်သက် → emoji ပဲ ပြောင်း\n\nBot ပိုင်ရှင် account မှာ Telegram Premium ရှိမှ premium emoji ပေါ်ပါမယ်";
   return { text, markup: { inline_keyboard: [[btn("❌ ပယ်ဖျက်", "eki:" + i, "danger")]] } };
 }
 const beginKbEdit = async (uid, full, mode) => { await delSS(uid); await KV.put("ed:" + uid, JSON.stringify({ kb: full, mode }), { expirationTtl: ED_TTL }).catch(() => {}); };
@@ -2371,12 +2522,13 @@ async function kbEmojiText(env, m, full, mode) {         // the owner's next mes
   const ces = (m.entities || []).filter((e) => e && e.type === "custom_emoji" && e.custom_emoji_id).sort((a, b) => a.offset - b.offset);
   const follow = { reply_markup: { inline_keyboard: [[btn("⌨️ Menu ခလုတ်များ", "ek", "primary"), btn("✏️ ဒီခလုတ် ပြန်ပြောင်း", "eki:" + idx)]] } };
   let msg;
-  if (mode === "text") {
-    const raw = String(m.text || "");
-    let plain = ces.length ? raw.slice(0, ces[0].offset) + raw.slice(ces[0].offset + ces[0].length) : raw;
-    plain = plain.replace(/\s+/g, " ").trim();
-    if (raw.trim().includes("\n") || [...plain].length > KBT_MAX) { await send(env, chat, "⚠️ ခလုတ်စာသားက တစ်ကြောင်းတည်း၊ စာလုံး " + KBT_MAX + " အထိပါ — ပြန်ပို့ပါ"); return true; }
-    if (!/[\p{L}\p{N}]/u.test(plain)) { await send(env, chat, "⚠️ ခလုတ်မှာ စာ (သို့) ဂဏန်း ပါရမယ် (emoji သက်သက် မရပါ) — ပြန်ပို့ပါ"); return true; }
+  const raw = String(m.text || "");
+  let plain = ces.length ? raw.slice(0, ces[0].offset) + raw.slice(ces[0].offset + ces[0].length) : raw;
+  plain = plain.replace(/\s+/g, " ").trim();
+  const hasText = /[\p{L}\p{N}]/u.test(plain);
+  if (!hasText && !ces.length) { await send(env, chat, "⚠️ စာ (သို့) premium emoji ပါရမယ် (ပုံမှန် emoji သက်သက် မရပါ) — ပြန်ပို့ပါ၊ မပြင်တော့ရင် ❌ နှိပ်ပါ"); return true; }
+  if (hasText && (raw.trim().includes("\n") || [...plain].length > KBT_MAX)) { await send(env, chat, "⚠️ ခလုတ်စာသားက တစ်ကြောင်းတည်း၊ စာလုံး " + KBT_MAX + " အထိပါ — ပြန်ပို့ပါ"); return true; }
+  if (hasText) {                                         // text (+ premium emoji if sent with it)
     const kbt = (await KV.get("kbt", "json").catch(() => null)) || {}, kbi = (await KV.get("kbi", "json").catch(() => null)) || {};
     if (plain === full) delete kbt[full]; else kbt[full] = plain;
     if (ces.length) kbi[full] = ces[0].custom_emoji_id;
@@ -2384,9 +2536,8 @@ async function kbEmojiText(env, m, full, mode) {         // the owner's next mes
     if (kbList().some((L) => L !== full && (kbSent(L, kbi, kbt) === sent || L === sent))) { await send(env, chat, "⚠️ ဒီစာနဲ့ တူတဲ့ ခလုတ် ရှိပြီးသားပါ — တခြားစာ ပြန်ပို့ပါ"); return true; }
     await (Object.keys(kbt).length ? KV.put("kbt", JSON.stringify(kbt)) : KV.delete("kbt")).catch(() => {});
     if (ces.length) await KV.put("kbi", JSON.stringify(kbi)).catch(() => {});
-    msg = "✅ <b>" + esc(full) + "</b> → <b>" + esc(plain) + "</b> ပြောင်းပြီးပါပြီ — အောက်က keyboard မှာ ကြည့်ပါ";
-  } else {
-    if (!ces.length) { await send(env, chat, "⚠️ Premium emoji ပါမှ ရမယ် (ပုံမှန် emoji မရပါ) — premium emoji တစ်ခု ပြန်ပို့ပါ၊ မထည့်တော့ရင် ❌ နှိပ်ပါ"); return true; }
+    msg = "✅ <b>" + esc(full) + "</b> → <b>" + esc(plain) + "</b>" + (ces.length ? " + 💎 premium emoji" : "") + " ပြောင်းပြီးပါပြီ — အောက်က keyboard မှာ ကြည့်ပါ";
+  } else {                                               // premium emoji only: the text stays
     const cur = (await KV.get("kbi", "json").catch(() => null)) || {};
     cur[full] = ces[0].custom_emoji_id;
     await KV.put("kbi", JSON.stringify(cur)).catch(() => {});
@@ -2573,6 +2724,18 @@ async function onPrivate(m, env) {
     if (/^\/chk(@\w+)?(\s|$)/i.test(t)) { await chkCommand(env, m, false); return; }
     if (owner && /^\/raw(@\w+)?(\s|$)/i.test(t)) return rawCommand(env, m);
     if (owner && /^\/abbr(@\w+)?(\s|$)/i.test(t)) return abbrCommand(env, chat, t);
+    { const c = calcText(t); if (c) return send(env, chat, c); }                    // "1+2" -> 3
+    if (/^[\p{L}\p{N}_.-]{1,12}$/u.test(t) && !/^\d{5,}$/.test(t)) {      // just the game abbreviation ("ml") -> that game's price list, tabs as buttons
+      const s0 = await getSS(uid);
+      if (!(s0 && ["id", "char"].includes(s0.step))) {
+        const store = await loadStore(env);
+        const g = store.groups ? (await abbrMap(store)).get(t.toLowerCase()) : null;
+        if (g) {
+          const v = g.entries.length > 1 ? srvPickView(g, { pre: "zv", close: "zvx" }) : priceView(g, 0, 0, 0, { pre: "zv", update: true, close: "zvx" });
+          return send(env, chat, v.text, { reply_markup: v.markup, disable_web_page_preview: true });
+        }
+      }
+    }
     if (await autoBuy(env, m, false)) return;          // "abbr ID [server] package" -> bought at once
     { const s0 = await getSS(uid);                     // "86" / "wp 2" / "86 172 wp" / "diamond" -> price card (not while the bot waits for an ID / Character Name)
       if (!(s0 && ["id", "char"].includes(s0.step)) && (await priceQuote(env, m, true))) return; }
@@ -2700,6 +2863,7 @@ async function handleInner(u, env) {
 
 export default {
   async fetch(req, env, ctx) {
+    ENVX = env;
     KV = pickKv(env);
     const url = new URL(req.url);
     if (url.pathname === "/setup") {
@@ -2752,7 +2916,8 @@ export default {
     }
     return new Response("OK");
   },
-  async scheduled(event, env, ctx) {                     // cron "* * * * *": cheap every minute, heavy only on minutes 0,5,10 ...
+  async scheduled(event, env, ctx) {
+    ENVX = env;                     // cron "* * * * *": cheap every minute, heavy only on minutes 0,5,10 ...
     KV = pickKv(env);
     LAST_SWEEP = Date.now();
     const heavy = new Date(event.scheduledTime || Date.now()).getUTCMinutes() % 5 === 0;
