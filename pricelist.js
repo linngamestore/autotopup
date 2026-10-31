@@ -63,6 +63,50 @@ const TABLE_CHUNK = 40;     // rows per table message
 const STORE_TTL_MS = 5 * 60 * 1000;
 
 let KV = null;
+/* ---------- D1 as the state store (instead of KV) ----------
+   Cloudflare KV free plan = only 1,000 writes / day (put + delete + list) -> a busy bot hits it fast.
+   D1 free plan = 100,000 rows written / day.  When a D1 database is bound as  DB  the bot keeps all its state there,
+   through this tiny adapter that has the same get / put / delete / list calls as KV (so the rest of the code is unchanged).
+   Without the DB binding the bot keeps using KV (STATE) exactly as before. */
+let D1KV = null;
+function d1Kv(db) {
+  if (D1KV && D1KV.db === db) return D1KV;
+  let ready = null;
+  const init = () => ready || (ready = db.prepare("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, e INTEGER) WITHOUT ROWID").run().catch((err) => { ready = null; throw err; }));
+  const nowS = () => Math.floor(Date.now() / 1000);
+  D1KV = {
+    db,
+    async get(k, type) {
+      await init();
+      const r = await db.prepare("SELECT v, e FROM kv WHERE k = ?").bind(String(k)).first();
+      if (!r || (r.e && r.e <= nowS())) return null;
+      return type === "json" ? JSON.parse(r.v) : r.v;
+    },
+    async put(k, v, o) {
+      await init();
+      const e = o && o.expirationTtl ? nowS() + Math.max(60, Number(o.expirationTtl) || 0) : null;
+      await db.prepare("INSERT INTO kv (k, v, e) VALUES (?1, ?2, ?3) ON CONFLICT(k) DO UPDATE SET v = excluded.v, e = excluded.e").bind(String(k), String(v), e).run();
+    },
+    async delete(k) {
+      await init();
+      await db.prepare("DELETE FROM kv WHERE k = ?").bind(String(k)).run();
+    },
+    async list(o = {}) {                                  // -> { keys:[{name}], list_complete, cursor }   (sorted by key, like KV)
+      await init();
+      const prefix = String(o.prefix || ""), limit = Math.min(Math.max(Number(o.limit) || 1000, 1), 1000), cursor = o.cursor ? String(o.cursor) : "";
+      const { results } = await db.prepare(`SELECT k FROM kv WHERE k ${cursor ? ">" : ">="} ?1 AND k < ?2 AND (e IS NULL OR e > ?3) ORDER BY k LIMIT ?4`)
+        .bind(cursor || prefix, prefix + "\uffff", nowS(), limit + 1).all();
+      const more = results.length > limit, keys = results.slice(0, limit).map((r) => ({ name: r.k }));
+      return { keys, list_complete: !more, cursor: more ? keys[keys.length - 1].name : undefined };
+    },
+    async cleanup() {                                     // expired rows are ignored when read; this frees the space (once an hour from the cron)
+      await init();
+      await db.prepare("DELETE FROM kv WHERE e IS NOT NULL AND e <= ?").bind(nowS()).run();
+    },
+  };
+  return D1KV;
+}
+const pickKv = (env) => (env.DB && typeof env.DB.prepare === "function" ? d1Kv(env.DB) : env.STATE || null);
 let LAST_SWEEP = 0;
 let LAST_HEAVY = 0;
 let ORIGIN = "";             // https://YOUR-WORKER... (learned from the incoming request) — used for the G2Bulk callback_url
@@ -100,7 +144,7 @@ async function tg(env, method, body) {
   if (body?.reply_markup && Array.isArray(body.reply_markup.keyboard)) {   // menu (reply) keyboard: put the saved premium icons on the buttons
     await loadKbi().catch(() => {});
     const mk = kbWithIcons(body.reply_markup);
-    if (mk !== body.reply_markup) { kbOrig = body.reply_markup; body = { ...body, reply_markup: mk }; }
+    if (mk !== body.reply_markup) { kbOrig = kbWithIcons(body.reply_markup, true); body = { ...body, reply_markup: mk }; }   // kbOrig = the same keyboard with the custom texts but without the icons (used if Telegram refuses an icon)
   }
   // Telegram answers 429 when many messages go out at once: wait the asked time and try again (max 2 retries).
   // A non-JSON reply (502 / HTML error page) becomes { ok: false } instead of throwing.
@@ -612,7 +656,8 @@ async function onGroupMessage(m, env) {
     const title = String(m.chat.title || chat).slice(0, 60);
     if ((await KV.get("grp:" + chat).catch(() => null)) !== title) await KV.put("grp:" + chat, title).catch(() => {});   // a read is 100x cheaper than a write
   }
-  const text = String(m.text || "").trim();
+  let text = String(m.text || "").trim();
+  if (text && !text.startsWith("/")) { await loadKbi().catch(() => {}); if (KBI_REV.get(text) === "📋 Price List") text = "📋 Price List"; }   // the group button may carry its own text / icon
   const am = text.match(/^\/admin(?:@(\w+))?\s+list$/i);
   if (am) {                                         // admin only: everybody else gets no reply at all
     if (am[1] && am[1].toLowerCase() !== (await botName(env))) return;
@@ -700,21 +745,26 @@ const KB_GROUP = { keyboard: [[{ text: "📋 Price List" }]], resize_keyboard: t
 /* Premium emoji on the menu (reply) keyboard: the owner sends  /kbicon <premium emoji> <button text>  (e.g. /kbicon 🛒 ဝယ်ယူရန်)  and it is saved in KV "kbi".
    Telegram then shows that emoji as the button icon and sends only the text when tapped — onPrivate() maps it back to the full label. */
 const kbStrip = (s) => String(s).replace(/^[^\p{L}\p{N}]+/u, "").trim();
-let KBI = {}, KBI_REV = new Map(), KBI_AT = 0;
+let KBI = {}, KBT = {}, KBI_REV = new Map(), KBI_AT = 0;       // KBI: label -> premium emoji id (KV "kbi") · KBT: label -> own button text (KV "kbt")
+const kbSent = (L, kbi = KBI, kbt = KBT) => { const txt = kbt[L] || L; return kbi[L] ? kbStrip(txt) : txt; };   // the text Telegram sends back when the button is tapped (with an icon the leading emoji is dropped)
 async function loadKbi() {
   if (Date.now() - KBI_AT < 30000) return;
   KBI_AT = Date.now();
-  try { KBI = (await KV.get("kbi", "json")) || {}; } catch { /* keep the old copy */ }
-  KBI_REV = new Map(Object.keys(KBI).map((k) => [kbStrip(k), k]));
+  try { const [a, b] = await Promise.all([KV.get("kbi", "json"), KV.get("kbt", "json")]); KBI = a || {}; KBT = b || {}; } catch { /* keep the old copy */ }
+  const rev = new Map();                                       // what a tapped button sends -> its fixed (default) label; an older keyboard still on someone's screen keeps working
+  for (const L of KB_LABELS) { rev.set(L, L); if (KBI[L] || KBT[L]) rev.set(kbStrip(L), L); }
+  for (const L of KB_LABELS) { rev.set(KBT[L] || L, L); rev.set(kbSent(L), L); }
+  KBI_REV = rev;
 }
-function kbWithIcons(mk) {
-  if (!mk || !Array.isArray(mk.keyboard) || !Object.keys(KBI).length) return mk;
+function kbWithIcons(mk, noIcon) {                              // noIcon = only the own texts (used when Telegram refuses the premium icons)
+  if (!mk || !Array.isArray(mk.keyboard) || (!Object.keys(KBI).length && !Object.keys(KBT).length)) return mk;
   let hit = false;
   const keyboard = mk.keyboard.map((row) => row.map((b) => {
-    const id = b && typeof b.text === "string" ? KBI[b.text] : null;
-    if (!id) return b;
+    if (!b || typeof b.text !== "string") return b;
+    const id = noIcon ? null : KBI[b.text], tx = KBT[b.text];
+    if (!id && !tx) return b;
     hit = true;
-    return { ...b, text: kbStrip(b.text), icon_custom_emoji_id: id };
+    return id ? { ...b, text: kbSent(b.text), icon_custom_emoji_id: id } : { ...b, text: tx };
   }));
   return hit ? { ...mk, keyboard } : mk;
 }
@@ -1401,8 +1451,11 @@ function parseBuyLine(line, aliases, prev) {             // -> { g, pid, segs:[{
   const m = t.match(/^([\p{L}\p{N}_.-]+)\s+([\s\S]+)$/u);
   let g;
   if (m && aliases.has(m[1])) { g = aliases.get(m[1]); t = m[2]; } else if (prev) g = prev; else return null;
+  let un = "";                                           // Telegram username as the player (tg @name 50): the @name is the ID, taken out before the text is split into words
+  { const um = t.match(/(^|[\s(])@([a-z][a-z0-9_]{3,31})(?=$|[\s)\/&])/); if (um) { un = um[2]; t = (t.slice(0, um.index) + um[1] + " " + t.slice(um.index + um[0].length)).trim(); } }
   const segs = t.split(/\s*[&\/]\s*/).flatMap((x) => readQtySeg(x));      // packages are separated by "/" (or "&"), a quantity can also split them
   if (!segs.length) return null;
+  if (un) return { g, pid: un, un: true, segs };
   const i = segs[0].tk.findIndex((x) => /^\d{5,14}$/.test(x) && !/^09\d{7,9}$/.test(x));
   if (i < 0) return null;
   const pid = segs[0].tk[i];
@@ -1470,7 +1523,7 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
   const lines = text.split(/\n+/).map((x) => x.trim()).filter(Boolean);
   const first = parseBuyLine(lines[0], aliases, null);
   if (!first) return false;                              // no abbreviation / no ID: not an order
-  if (lines.length === 1 && first.segs.length === 1 && first.segs[0].qty === 1) {      // "abbr ID [server]" with no package = name check, nothing is bought
+  if (!first.un && lines.length === 1 && first.segs.length === 1 && first.segs[0].qty === 1) {      // "abbr ID [server]" with no package = name check, nothing is bought
     const r0 = first.segs[0].tk;
     const e0 = first.g.entries.find((e) => e.f.idCheck) || first.g.entries[0];
     const isNum = r0.length === 1 && /^\d{2,7}$/.test(r0[0]);
@@ -1508,12 +1561,12 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
         if (!pv.ok || !keyReady(env, pv)) { fail(ln, pv.why || "Provider key မထည့်ရသေးပါ"); continue; }
         if (rq.needsChar) { fail(ln, "Character Name လိုတဲ့ game — 🛒 ခလုတ်နဲ့ ဝယ်ပါ"); continue; }
         let s = h.sid, sname = "";
-        if (rq.needsServer) {
+        if (rq.needsServer && !p.un) {
           if (!s) { fail(ln, "Server ID မပါပါ"); continue; }
           const opts = await resolveServers(entry);
           if (opts.length) { const o = opts.find((x) => String(x.value) === s); if (!o) { fail(ln, "Server ID မကိုက်ပါ"); continue; } sname = o.label; }
         } else s = "";
-        const u = { line: ln, group: p.g, entry, pkg, pv, pid: p.pid, sid: s, sname, pname: "" };
+        const u = { line: ln, group: p.g, entry, pkg, pv, pid: p.pid, sid: s, sname, pname: "", un: !!p.un };
         for (let n = 0; n < sg.qty; n++) units.push(u);
       }
     }
@@ -1521,7 +1574,7 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
   if (units.length > BATCH_MAX) fail("-", `Order စုစုပေါင်း ${units.length} ခု — ${BATCH_MAX} ခုထိပဲ ရပါမယ်`);
   if (!errs.length) {                                    // ID check once per player
     const uniq = [...new Set(units)], checks = new Map();
-    for (const u of uniq) if (reqOf(u.entry).needsId && u.pv.key === "g2bulk" && u.entry.f.idCheck) {
+    for (const u of uniq) if (!u.un && reqOf(u.entry).needsId && u.pv.key === "g2bulk" && u.entry.f.idCheck) {
       const k = [u.entry.f.idCheck, u.pid, u.sid].join("|");
       if (!checks.has(k)) checks.set(k, checkPlayer(u.entry.f.idCheck, u.pid, u.sid, ""));
     }
@@ -2278,6 +2331,7 @@ function tplMenuView() {
   const c = tplNow()._custom || {};
   const rows = TPL_KEYS.map((k) => [btn((c[k] ? "🎨 " : "") + TPL_LABEL[k], "ev:" + k, "primary")]);
   rows.push([btn((TPL_BTN_KEYS.some((k) => c[k]) ? "🎨 " : "") + "🔘 ခလုတ်စာသားများ", "eb", "primary")]);
+  rows.push([btn("⌨️ Menu ခလုတ် (စာ / emoji)", "ek", "primary")]);
   rows.push([btn("♻️ အားလုံး Default ပြန်ထား", "ez"), btn("❌ ပိတ်", "ax", "danger")]);
   return { text: "🎨 <b>Card ပြင်ဆင်ရန်</b>\nပြင်ချင်တဲ့ card ကို ရွေးပါ 👇\n🎨 = ပြင်ထားပြီးသား", markup: { inline_keyboard: rows } };
 }
@@ -2286,6 +2340,64 @@ function btnMenuView() {
   const rows = TPL_BTN_KEYS.map((k) => [btn((c[k] ? "🎨 " : "") + TPL_LABEL[k], "ev:" + k, "primary")]);
   rows.push([btn("⬅️ Card များ", "ec")]);
   return { text: "🔘 <b>Order card အောက်က ခလုတ်စာသားများ</b>\nပြင်ချင်တာ ရွေးပါ 👇", markup: { inline_keyboard: rows } };
+}
+/* ----- ⌨️ Menu ခလုတ် emoji: premium emoji on the menu (reply) keyboard, set from buttons — no /kbicon command needed ----- */
+const kbList = () => [...KB_LABELS];
+const KBT_MAX = 30;
+function kbMenuView() {
+  const rows = kbList().map((x, i) => [btn((KBI[x] ? "💎 " : "") + (KBT[x] || x), "eki:" + i, "primary")]);
+  rows.push([btn("♻️ အကုန် ပုံမှန်ပြန်ထား", "ekz", "danger"), btn("⬅️ Card များ", "ec")]);
+  return { text: "⌨️ <b>Menu ခလုတ်များ</b>\nစာ / premium emoji ပြင်ချင်တဲ့ ခလုတ်ကို ရွေးပါ 👇\n💎 = premium emoji ထည့်ထားပြီး", markup: { inline_keyboard: rows } };
+}
+function kbPickView(i) {
+  const full = kbList()[i];
+  const rows = [[btn("✏️ စာပြောင်း", "ekt:" + i, "primary"), btn("💎 Emoji ထည့်/ပြောင်း", "ekm:" + i, "primary")]];
+  if (KBI[full] || KBT[full]) rows.push([btn("♻️ ပုံမှန်ပြန်ထား", "ekr:" + i, "danger")]);
+  rows.push([btn("⬅️ ခလုတ်များ", "ek")]);
+  return { text: "⌨️ <b>" + esc(KBT[full] || full) + "</b>" + (KBT[full] ? "\nမူလ — " + esc(full) : "") + "\n" + (KBI[full] ? "💎 premium emoji ထည့်ထားပါတယ်" : "premium emoji မထည့်ရသေးပါ"), markup: { inline_keyboard: rows } };
+}
+function kbPrompt(i, mode) {
+  const full = kbList()[i];
+  const text = mode === "text"
+    ? "✏️ <b>" + esc(KBT[full] || full) + "</b>\n\nခလုတ်ရဲ့ စာအသစ်ကို <b>တစ်ကြောင်းတည်း</b> (စာလုံး " + KBT_MAX + " အထိ) ပို့ပါ။ ပုံမှန် emoji ထည့်လို့ရပါတယ်။\n\nPremium emoji တစ်ခု ထည့်ပို့ရင် ခလုတ်ရဲ့ ဘယ်စွန်းမှာ ပေါ်ပါမယ် (Bot ပိုင်ရှင် account မှာ Telegram Premium ရှိရပါမယ်)"
+    : "💎 <b>" + esc(KBT[full] || full) + "</b>\n\nခလုတ်မှာ ပေါ်စေချင်တဲ့ <b>premium emoji တစ်ခု</b> ကို message တစ်ခုအနေနဲ့ ပို့ပါ (စာမလို၊ emoji သက်သက်ပဲ)\n\nBot ပိုင်ရှင် account မှာ Telegram Premium ရှိမှ premium emoji ပို့လို့ရပါမယ်";
+  return { text, markup: { inline_keyboard: [[btn("❌ ပယ်ဖျက်", "eki:" + i, "danger")]] } };
+}
+const beginKbEdit = async (uid, full, mode) => { await delSS(uid); await KV.put("ed:" + uid, JSON.stringify({ kb: full, mode }), { expirationTtl: ED_TTL }).catch(() => {}); };
+async function kbEmojiText(env, m, full, mode) {         // the owner's next message: the premium emoji (mode "emoji") or the new button text (mode "text") of that menu button
+  const uid = m.from.id, chat = m.chat.id, t = String(m.text || "").trim();
+  if (KB_LABELS.has(t) || /^\/\w+/.test(t)) { await endEdit(uid); return false; }
+  const idx = kbList().indexOf(full);
+  const ces = (m.entities || []).filter((e) => e && e.type === "custom_emoji" && e.custom_emoji_id).sort((a, b) => a.offset - b.offset);
+  const follow = { reply_markup: { inline_keyboard: [[btn("⌨️ Menu ခလုတ်များ", "ek", "primary"), btn("✏️ ဒီခလုတ် ပြန်ပြောင်း", "eki:" + idx)]] } };
+  let msg;
+  if (mode === "text") {
+    const raw = String(m.text || "");
+    let plain = ces.length ? raw.slice(0, ces[0].offset) + raw.slice(ces[0].offset + ces[0].length) : raw;
+    plain = plain.replace(/\s+/g, " ").trim();
+    if (raw.trim().includes("\n") || [...plain].length > KBT_MAX) { await send(env, chat, "⚠️ ခလုတ်စာသားက တစ်ကြောင်းတည်း၊ စာလုံး " + KBT_MAX + " အထိပါ — ပြန်ပို့ပါ"); return true; }
+    if (!/[\p{L}\p{N}]/u.test(plain)) { await send(env, chat, "⚠️ ခလုတ်မှာ စာ (သို့) ဂဏန်း ပါရမယ် (emoji သက်သက် မရပါ) — ပြန်ပို့ပါ"); return true; }
+    const kbt = (await KV.get("kbt", "json").catch(() => null)) || {}, kbi = (await KV.get("kbi", "json").catch(() => null)) || {};
+    if (plain === full) delete kbt[full]; else kbt[full] = plain;
+    if (ces.length) kbi[full] = ces[0].custom_emoji_id;
+    const sent = kbSent(full, kbi, kbt);
+    if (kbList().some((L) => L !== full && (kbSent(L, kbi, kbt) === sent || L === sent))) { await send(env, chat, "⚠️ ဒီစာနဲ့ တူတဲ့ ခလုတ် ရှိပြီးသားပါ — တခြားစာ ပြန်ပို့ပါ"); return true; }
+    await (Object.keys(kbt).length ? KV.put("kbt", JSON.stringify(kbt)) : KV.delete("kbt")).catch(() => {});
+    if (ces.length) await KV.put("kbi", JSON.stringify(kbi)).catch(() => {});
+    msg = "✅ <b>" + esc(full) + "</b> → <b>" + esc(plain) + "</b> ပြောင်းပြီးပါပြီ — အောက်က keyboard မှာ ကြည့်ပါ";
+  } else {
+    if (!ces.length) { await send(env, chat, "⚠️ Premium emoji ပါမှ ရမယ် (ပုံမှန် emoji မရပါ) — premium emoji တစ်ခု ပြန်ပို့ပါ၊ မထည့်တော့ရင် ❌ နှိပ်ပါ"); return true; }
+    const cur = (await KV.get("kbi", "json").catch(() => null)) || {};
+    cur[full] = ces[0].custom_emoji_id;
+    await KV.put("kbi", JSON.stringify(cur)).catch(() => {});
+    msg = "✅ <b>" + esc(full) + "</b> မှာ premium emoji ထည့်ပြီးပါပြီ — အောက်က keyboard မှာ ကြည့်ပါ";
+  }
+  KBI_AT = 0; await loadKbi(); await endEdit(uid);
+  ICON_REFUSED = false;
+  await send(env, chat, msg, { reply_markup: KB });
+  if (ICON_REFUSED) await send(env, chat, "⚠️ Telegram က menu ခလုတ်ထဲ premium emoji ကို လက်မခံပါဘူး — ပုံမှန် emoji ပဲ ပေါ်မယ်။ Bot ပိုင်ရှင် account မှာ Telegram Premium ရှိမှ ပေါ်ပါမယ်");
+  await send(env, chat, "⌨️ တခြားခလုတ် ဆက်ပြင်မလား?", follow);
+  return true;
 }
 function tplCardView(key) {
   const custom = !!(tplNow()._custom || {})[key];
@@ -2333,6 +2445,7 @@ async function editExpired(env, chat, uid) {            // true = the Owner's ED
 async function tplEditText(env, m) {                     // the owner's next message is the new card; false = not editing
   const uid = m.from.id, chat = m.chat.id, t = String(m.text || "");
   const st = await KV.get("ed:" + uid, "json").catch(() => null);
+  if (st && st.kb && KB_LABELS.has(st.kb)) return kbEmojiText(env, m, st.kb, st.mode);
   if (!st || !TPL_DEF[st.key]) return false;
   if (KB_LABELS.has(t.trim()) || /^\/\w+/.test(t.trim())) { await endEdit(uid); return false; }   // a keyboard button / command ends the editing
   await KV.put("ed:" + uid, JSON.stringify({ key: st.key }), { expirationTtl: ED_TTL }).catch(() => {});   // still editing: renew the 6 h
@@ -2377,6 +2490,29 @@ async function onTplCallback(q, env, ans, edit) {
   }
   if (tag === "ezy") { await ans("♻️ Default ပြန်ထားပြီး"); await saveTpl(env, null, null); return edit(tplMenuView()); }
   if (tag === "eb") { await ans(); return edit(btnMenuView()); }
+  if (tag === "ek" || tag === "eki" || tag === "ekm" || tag === "ekt" || tag === "ekr" || tag === "ekz") {          // ⌨️ menu keyboard: own text + premium emoji
+    if (!isOwner(env, uid)) return ans("⛔ Owner ပဲ သုံးလို့ရပါတယ်");
+    KBI_AT = 0; await loadKbi().catch(() => {});
+    if (tag === "ek") { await ans(); await endEdit(uid); return edit(kbMenuView()); }
+    if (tag === "ekz") {
+      await ans("♻️ ပုံမှန်ပြန်ထားပြီး");
+      await Promise.all([KV.delete("kbi"), KV.delete("kbt")]).catch(() => {}); KBI_AT = 0; await loadKbi().catch(() => {});
+      await send(env, chat, "✅ Menu ခလုတ်တွေ ပုံမှန်စာ၊ ပုံမှန် emoji ပြန်ဖြစ်ပါပြီ", { reply_markup: KB });
+      return edit(kbMenuView());
+    }
+    const i = Number(k), full = kbList()[i];
+    if (!full) return ans();
+    if (tag === "eki") { await ans(); await endEdit(uid); return edit(kbPickView(i)); }
+    if (tag === "ekm" || tag === "ekt") { await ans(); const mode = tag === "ekt" ? "text" : "emoji"; await beginKbEdit(uid, full, mode); return edit(kbPrompt(i, mode)); }
+    await ans("♻️ ပုံမှန်ပြန်ထားပြီး");
+    const [ci, ct] = await Promise.all([KV.get("kbi", "json").catch(() => null), KV.get("kbt", "json").catch(() => null)]);
+    const cur = ci || {}, cut = ct || {};
+    if (full in cur) { delete cur[full]; await (Object.keys(cur).length ? KV.put("kbi", JSON.stringify(cur)) : KV.delete("kbi")).catch(() => {}); }
+    if (full in cut) { delete cut[full]; await (Object.keys(cut).length ? KV.put("kbt", JSON.stringify(cut)) : KV.delete("kbt")).catch(() => {}); }
+    KBI_AT = 0; await loadKbi().catch(() => {});
+    await send(env, chat, "✅ <b>" + esc(full) + "</b> ပုံမှန်စာ၊ ပုံမှန် emoji ပြန်ဖြစ်ပါပြီ", { reply_markup: KB });
+    return edit(kbMenuView());
+  }
   if (!key) return ans();
   if (tag === "ev") { await ans(); await endEdit(uid); return edit(tplCardView(key)); }
   if (tag === "ee") {
@@ -2564,7 +2700,7 @@ async function handleInner(u, env) {
 
 export default {
   async fetch(req, env, ctx) {
-    KV = env.STATE || null;
+    KV = pickKv(env);
     const url = new URL(req.url);
     if (url.pathname === "/setup") {
       if (url.searchParams.get("key") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
@@ -2574,6 +2710,21 @@ export default {
       const menu = {};                                  // owners / admins: ≡ menu = 💳 API Balance + ℹ️ အကူအညီ   (true = Telegram accepted it)
       for (const id of [...new Set([...idList(env.OWNER_IDS), ...idList(env.ADMIN_IDS)])]) menu[id] = await ensureMenu(env, id, true).catch(() => false);
       return new Response(JSON.stringify({ webhook: r, menu }), { headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === "/migrate") {                    // one time: copy the saved settings (cards, abbreviations, menu icons, groups) from KV (STATE) into D1 (DB)
+      if (url.searchParams.get("key") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
+      if (!env.DB || !env.STATE) return new Response("DB (D1) နဲ့ STATE (KV) binding နှစ်ခုလုံး ရှိမှ ကူးလို့ရပါမယ်", { status: 400 });
+      const to = d1Kv(env.DB); let n = 0;
+      for (const k of ["tpl:all", "abbr:all", "kbi", "bal:g2"]) { const v = await env.STATE.get(k); if (v !== null) { await to.put(k, v); n++; } }
+      for (const pre of ["grp:", "gg:", "menu:"]) {
+        for (let cursor; ;) {
+          const l = await env.STATE.list({ prefix: pre, cursor });
+          for (const k of l.keys) { const v = await env.STATE.get(k.name); if (v !== null) { await to.put(k.name, v); n++; } }
+          if (l.list_complete) break;
+          cursor = l.cursor;
+        }
+      }
+      return new Response("ကူးပြီးပါပြီ — " + n + " ခု");
     }
     if (!ORIGIN || ORIGIN !== url.origin) ORIGIN = url.origin;
     if (url.pathname === "/g2hook") {                    // G2Bulk "order finished" callback
@@ -2602,9 +2753,10 @@ export default {
     return new Response("OK");
   },
   async scheduled(event, env, ctx) {                     // cron "* * * * *": cheap every minute, heavy only on minutes 0,5,10 ...
-    KV = env.STATE || null;
+    KV = pickKv(env);
     LAST_SWEEP = Date.now();
     const heavy = new Date(event.scheduledTime || Date.now()).getUTCMinutes() % 5 === 0;
+    if (KV && KV.cleanup && new Date(event.scheduledTime || Date.now()).getUTCMinutes() === 0) ctx.waitUntil(KV.cleanup().catch(() => {}));
     if (heavy) { LAST_HEAVY = Date.now(); ctx.waitUntil(sweep(env).catch((e) => console.error(e))); }
     ctx.waitUntil(pollOpenOrders(env, heavy).catch((e) => console.error(e)));
   },
