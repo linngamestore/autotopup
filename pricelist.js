@@ -398,7 +398,7 @@ const SOFT = "┄┄┄┄┄┄┄┄┄┄┄┄";                            
 // Every line with placeholders disappears when its values are empty, and an empty quote block disappears with it (voucher orders have no ID block).
 const ORDER_BODY = "\n\n<blockquote>\n🎮 <b>{title}</b>\n📦 {amount}\n💰 <b>{price} MMK</b>\n</blockquote>" +
   "\n\n<blockquote>\n🆔 <code>{pid}</code>\n🖥 {serverid}\n🎭 {cname}\n👤 <b>{pname}</b>\n</blockquote>" +
-  "\n\n🧾 <code>{id}</code>\n🚚 {via}\n🕐 {date}\n🙋 {byline}\n\n{codeblock}\n\n⚠️ {error}";
+  "\n\n🧾 <code>{id}</code>\n🔖 {via}\n🕐 {date}\n🙋 {byline}\n\n{codeblock}\n\n⚠️ {error}";
 const TPL_DEF = {
   proc: "⏳ <b>လုပ်ဆောင်နေပါတယ်</b>\n<i>Provider ဆီက အဖြေကို စောင့်နေပါတယ် — ခဏစောင့်ပါ</i>" + ORDER_BODY,
   done: "✅ <b>အောင်မြင်ပါပြီ</b>\n<i>Top-up ဝင်သွားပါပြီ</i>" + ORDER_BODY,
@@ -1083,7 +1083,7 @@ async function g2Hook(env, ref) {                       // runs after the 200 re
   }                                                     // still Processing: the cron picks it up
 }
 async function g2Call(env, path, body, idem) {
-  if (await g2Blocked()) return { res: { status: 401, ok: false }, data: { message: "G2Bulk API key မမှန်ပါ (401) — ခေါ်တာ ခဏရပ်ထားပါတယ်" } };
+  if (await g2Blocked()) return { res: { status: 401, ok: false }, data: { message: "API key မမှန်ပါ (401) — ခေါ်တာ ခဏရပ်ထားပါတယ်" } };
   let res, data;
   for (let n = 0; n < 3; n++) {
     res = await fetch(G2 + path, {
@@ -1162,8 +1162,8 @@ function providerOf(entry, pkg) {                       // same priority as the 
   if (pkg.g2bulk && f.g2code) return { key: "g2bulk", label: "G2Bulk", ok: true };
   if (pkg.voucherId) return { key: "voucher", label: "G2Bulk Voucher", ok: true };
   if (pkg.fazercardOfferId && f.fzCat) return { key: "fazercard", label: "FazerCards", ok: true };
-  if (pkg.jcplays && f.jcplaysProduct) return { key: "jcplays", label: "JCPlays", ok: false, why: "JCPlays ကို bot က မခေါ်နိုင်သေးပါ — Admin Panel ကနေ လုပ်ပါ" };
-  if (pkg.fazercardGiftCardId && f.fzGift) return { key: "fzgift", label: "FazerCards Gift", ok: false, why: "FazerCards Gift Card ကို bot က မခေါ်နိုင်သေးပါ — Admin Panel ကနေ လုပ်ပါ" };
+  if (pkg.jcplays && f.jcplaysProduct) return { key: "jcplays", label: "JCPlays", ok: false, why: "ဒီ package ကို bot က မခေါ်နိုင်သေးပါ — Admin Panel ကနေ လုပ်ပါ" };
+  if (pkg.fazercardGiftCardId && f.fzGift) return { key: "fzgift", label: "FazerCards Gift", ok: false, why: "ဒီ package ကို bot က မခေါ်နိုင်သေးပါ — Admin Panel ကနေ လုပ်ပါ" };
   return { key: "none", label: "-", ok: false, why: "ဒီ package မှာ provider မသတ်မှတ်ရသေးပါ" };
 }
 const keyReady = (env, pv) => (pv.key === "fazercard" ? !!env.FAZERCARD_KEY : pv.key === "g2bulk" || pv.key === "voucher" ? !!env.G2BULK_KEY : false);
@@ -1261,7 +1261,7 @@ function detailView(env, store, ss) {
   const { entry, pkg } = ctxOf(store, ss);
   const pv = providerOf(entry, pkg);
   const ready = pv.ok && keyReady(env, pv);
-  const blocker = ready ? "" : pv.why || (pv.key === "fazercard" ? "FAZERCARD_KEY secret မထည့်ရသေးပါ" : "G2BULK_KEY secret မထည့်ရသေးပါ");
+  const blocker = ready ? "" : pv.why || "Provider key မထည့်ရသေးပါ";
   const text = tplOut("detail", detailVars(ss, pv.label, blocker));
   const rows = [];
   if (ready) rows.push([btn("✅ Confirm", "zc", "success")]);
@@ -1273,7 +1273,7 @@ function detailVars(ss, provider, blocker) {
   return {
     title: esc(ss.title || ""), amount: esc(ss.amount || ""), price: fmt(ss.price), pid: esc(ss.pid || ""), sid: esc(ss.sid || ""), sname,
     serverid: ss.sid ? `<code>${esc(ss.sid)}</code>${sname ? ` (${sname})` : ""}` : "", cname: esc(ss.cname || ""), pname: esc(ss.pname || ""),
-    provider: esc(provider || ""), warn: esc(ss.warn || ""), blocker: esc(blocker || ""),
+    provider: "", warn: esc(ss.warn || ""), blocker: esc(blocker || ""),
     hint: blocker ? "" : "👇 အားလုံးမှန်ရင် ✅ Confirm နှိပ်ပါ",
   };
 }
@@ -1316,7 +1316,7 @@ async function advance(env, chat, ss, store) {          // go to whatever the or
       return show(env, chat, ss, idPrompt(ss));
     }
     if (r.outcome === "valid") ss.pname = r.name || "";
-    else ss.warn = "ID ကို စစ်မရနိုင်ပါ (G2Bulk မတုံ့ပြန်) — ID ကို ကိုယ်တိုင်သေချာစစ်ပြီးမှ Confirm နှိပ်ပါ";
+    else ss.warn = "ID ကို စစ်မရနိုင်ပါ (မတုံ့ပြန်) — ID ကို ကိုယ်တိုင်သေချာစစ်ပြီးမှ Confirm နှိပ်ပါ";
   }
   ss.step = "detail"; ss.err = "";
   return show(env, chat, ss, detailView(env, store, ss));
@@ -1432,12 +1432,24 @@ function quickMatches(pool, pq) {                       // every (game, server, 
    several lines = several IDs (a line without the abbreviation uses the one above).
    Everything is checked first: if ONE line is wrong nothing is bought and the card says which line. */
 const initials = (n) => String(n).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((w) => w[0]).join("");
-async function abbrMap(store) {                          // alias -> game   (initials of the name; the owner's /abbr aliases win)
+const defEntryIdx = (g) => {
+  const i = g.entries.findIndex((e) => !e.server || /^(global|default)$/i.test(e.server));
+  return i >= 0 ? i : 0;
+};
+const onlyEntry = (g, i) => ({ ...g, entries: [g.entries[i]], _ei: i });   // same game id, one server only (_ei = its index in the real game)
+async function abbrMap(store) {                          // alias -> game  (ml = default server, mls = ml + Singapore ...)
   const custom = (await KV.get("abbr:all", "json").catch(() => null)) || {};
-  const auto = new Map(), out = new Map();
+  const auto = new Map(), base = new Map(), out = new Map();
   for (const g of store.groups) { const i = initials(g.name); if (i.length >= 2) auto.set(i, [...(auto.get(i) || []), g]); }
-  for (const [a, l] of auto) if (l.length === 1) out.set(a, l[0]);          // two games with the same initials: neither is used, set one with /abbr
-  for (const [a, key] of Object.entries(custom)) { const g = store.groups.find((x) => x.key === key); if (g) out.set(a, g); }
+  for (const [a, l] of auto) if (l.length === 1) base.set(a, l[0]);          // two games with the same initials: neither is used, set one with /abbr
+  for (const [a, key] of Object.entries(custom)) { const g = store.groups.find((x) => x.key === key); if (g) base.set(a, g); }
+  for (const [a, g] of base) out.set(a, g.entries.length > 1 ? onlyEntry(g, defEntryIdx(g)) : g);   // plain alias = default server
+  for (const [a, g] of base) {                           // alias + server initial(s) = that server
+    if (g.entries.length < 2) continue;
+    const d = defEntryIdx(g), cand = new Map();
+    g.entries.forEach((e, i) => { if (i === d) return; const s = initials(e.server); if (s) cand.set(a + s, [...(cand.get(a + s) || []), i]); });
+    for (const [k, l] of cand) if (l.length === 1 && !out.has(k)) out.set(k, onlyEntry(g, l[0]));
+  }
   return out;
 }
 async function abbrCommand(env, chat, t) {               // owner: /abbr  |  /abbr ml = mobile legends  |  /abbr del ml
@@ -1457,8 +1469,11 @@ async function abbrCommand(env, chat, t) {               // owner: /abbr  |  /ab
     return send(env, chat, `<code>${esc(a)}</code>  =  <b>${esc(pick[0].name)}</b>`);
   }
   const by = new Map();
-  for (const [a, g] of await abbrMap(store)) by.set(g, [...(by.get(g) || []), a]);
-  const rows = store.groups.map((g) => `<b>${esc(g.name)}</b>  ${by.get(g) ? by.get(g).map((a) => `<code>${esc(a)}</code>`).join(" ") : "—"}`);
+  for (const [a, g] of await abbrMap(store)) {
+    const sv = g._ei !== undefined && g.entries[0].server ? ` (${esc(g.entries[0].server)})` : "";
+    by.set(g.id, [...(by.get(g.id) || []), `<code>${esc(a)}</code>${sv}`]);
+  }
+  const rows = store.groups.map((g) => `<b>${esc(g.name)}</b>  ${by.get(g.id) ? by.get(g.id).join(" ") : "—"}`);
   return send(env, chat, cut("<b>Game အတိုကောက်များ</b>\n" + LINE + "\n" + rows.join("\n") + "\n" + LINE + "\nသတ်မှတ် — <code>/abbr ml = mobile legends</code>\nဖျက် — <code>/abbr del ml</code>", 3900));
 }
 async function g2Balance(env) {                          // USD balance of the G2Bulk API account, null when it cannot be read
@@ -1618,11 +1633,37 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
   const store = await loadStore(env);
   if (!store.groups) return false;
   let pool = store.groups;
-  if (inGroup) { const al = await getAllowed(chat); pool = pool.filter((g) => al.includes(g.key)); if (!pool.length) return false; }
+  const hint = async (msg) => {                          // an admin who typed something that looks like an order is never left without an answer
+    const r = await send(env, chat, msg, replyTo(m.message_id));
+    if (inGroup) await scheduleDelete(env, chat, r?.result?.message_id, 30 * 1000);
+    return true;
+  };
+  if (inGroup) {
+    const al = await getAllowed(chat); pool = pool.filter((g) => al.includes(g.key));
+    if (!pool.length) return parseQuick(text) ? hint("ℹ️ ဒီ Group အတွက် Game မသတ်မှတ်ရသေးပါ — Owner က 👥 Group စီမံရန် မှာ သတ်မှတ်ပါ") : false;
+  }
   const aliases = await abbrMap({ groups: pool });
   const lines = text.split(/\n+/).map((x) => x.trim()).filter(Boolean);
-  const first = parseBuyLine(lines[0], aliases, null);
-  if (!first) return false;                              // no abbreviation / no ID: not an order
+  // a group with ONE game: the abbreviation can be left out ("1922487065 19110 wp"); several games: it is needed
+  const dflt = inGroup && pool.length === 1 ? (pool[0].entries.length > 1 ? onlyEntry(pool[0], defEntryIdx(pool[0])) : pool[0]) : null;
+  let first = parseBuyLine(lines[0], aliases, dflt);
+  if (!first && inGroup && pool.length > 1 && parseQuick(lines[0])) {      // a group with two games and no abbreviation: the game whose packages fit the line is the one
+    const fits = [];
+    for (const g of pool) {
+      const gg = g.entries.length > 1 ? onlyEntry(g, defEntryIdx(g)) : g;
+      const p = parseBuyLine(lines[0], aliases, gg);
+      if (!p) continue;
+      const ok = p.segs.every((sg) => sg.tk.length ? (quickMatches([gg], { id: p.pid, rest: sg.tk }).length > 0 || !!multiHits(gg, p.pid, sg.tk)) : true);
+      const named = p.segs.length === 1 && p.segs[0].tk.every((x) => /^\d{2,7}$/.test(x));      // "ID [server]" only = name check: fits every game
+      if (ok && !named && p.segs.some((sg) => sg.tk.length)) fits.push(p);
+    }
+    if (fits.length === 1) first = fits[0];
+    else if (fits.length > 1) return hint("🛒 Game နှစ်ခုလုံးမှာ ဒီ Package ရှိနေပါတယ် — Game အတိုကောက် ထည့်ပါ\n" + ([...aliases.keys()].slice(0, 8).map((a) => `<code>${esc(a)}</code>`).join(" ") || "-"));
+  }
+  if (!first) {                                          // no abbreviation / no ID: not an order
+    if (parseQuick(lines[0])) return hint("🛒 ဝယ်ရန် <b>Game အတိုကောက်</b> ထည့်ပါ\nပုံစံ — <code>" + esc([...aliases.keys()][0] || "ml") + " 123456789 2001 86</code>\nရတဲ့ အတိုကောက် — " + ([...aliases.keys()].slice(0, 8).map((a) => `<code>${esc(a)}</code>`).join(" ") || "-"));
+    return false;
+  }
   if (!first.un && lines.length === 1 && first.segs.length === 1 && first.segs[0].qty === 1) {      // "abbr ID [server]" with no package = name check, nothing is bought
     const r0 = first.segs[0].tk;
     const e0 = first.g.entries.find((e) => e.f.idCheck) || first.g.entries[0];
@@ -1683,7 +1724,7 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
       const r = res.get([u.entry.f.idCheck, u.pid, u.sid].join("|"));
       if (!r) continue;
       if (r.outcome === "invalid") fail(u.line, r.reason === "server" ? "Server ID မကိုက်ပါ" : "ဒီ Player ID ကို မတွေ့ပါ");
-      else if (r.outcome === "unknown" && env.AUTO_BUY_UNCHECKED !== "1") fail(u.line, "ID စစ်မရပါ (G2Bulk မတုံ့ပြန်) — ခဏနေ ပြန်ပို့ပါ");
+      else if (r.outcome === "unknown" && env.AUTO_BUY_UNCHECKED !== "1") fail(u.line, "ID စစ်မရပါ (မတုံ့ပြန်) — ခဏနေ ပြန်ပို့ပါ");
       else if (r.outcome === "valid") u.pname = r.name || "";
     }
   }
@@ -2039,18 +2080,18 @@ async function fulfill(env, o, entry, pkg) {            // -> fields to merge in
       const { res, data } = await g2Call(env, `/v1/games/${encodeURIComponent(entry.f.g2code)}/order`, {
         catalogue_name: pkg.g2bulk, player_id: o.pid, server_id: o.sid || undefined, charname: o.cname || undefined, remark: `Bot order ${o.id}`, callback_url: (await hookUrl(env)) || undefined,
       }, o.idem);
-      if (res.status === 401) return { status: "failed", error: "G2Bulk API key မမှန်ပါ (401)" };
+      if (res.status === 401) return { status: "failed", error: "API key မမှန်ပါ (401)" };
       if (!res.ok || data.success === false) return res.status >= 500 ? { status: "unknown", error: unsure } : { status: "failed", error: errMsg(data, res) };
       return { status: mapStatus(data.status || data.order?.status || "PENDING"), ref: String(data.order_id ?? data.order?.order_id ?? "") };
     }
     if (o.provider === "voucher") {
       const { res, data } = await g2Call(env, `/v1/products/${encodeURIComponent(pkg.voucherId)}/purchase`, { quantity: 1 }, o.idem);
-      if (res.status === 401) return { status: "failed", error: "G2Bulk API key မမှန်ပါ (401)" };
+      if (res.status === 401) return { status: "failed", error: "API key မမှန်ပါ (401)" };
       if (!res.ok || data.success === false) return res.status >= 500 ? { status: "unknown", error: unsure } : { status: "failed", error: errMsg(data, res) };
       const st = mapStatus(data.status);
       const items = Array.isArray(data.delivery_items) ? data.delivery_items.map(itemText) : [];
       const ref = String(data.order_id || "");
-      if (st === "failed") return { status: "failed", ref, error: "G2Bulk voucher order failed/refunded" };
+      if (st === "failed") return { status: "failed", ref, error: "Voucher order failed/refunded" };
       if (st === "completed" && items.length) return { status: "completed", ref, delivery: items };
       return { status: "processing", ref, poll: data.poll_url || (ref ? `/v1/orders/${ref}/delivery` : "") };
     }
@@ -2063,7 +2104,7 @@ async function fulfill(env, o, entry, pkg) {            // -> fields to merge in
         body: JSON.stringify({ category_id: entry.f.fzCat, offer_id: pkg.fazercardOfferId, fields }), signal: AbortSignal.timeout(25000),
       });
       const data = await res.json().catch(() => ({}));
-      if (!data.ok) return res.status >= 500 ? { status: "unknown", error: unsure } : { status: "failed", error: String(data.error || `FazerCards HTTP ${res.status}`) };
+      if (!data.ok) return res.status >= 500 ? { status: "unknown", error: unsure } : { status: "failed", error: String(data.error || `HTTP ${res.status}`) };
       return { status: mapStatus((data.order && data.order.status) || "processing"), ref: String((data.order && data.order.id) || "") };
     }
     return { status: "failed", error: "Provider မသတ်မှတ်ရသေးပါ" };
@@ -2093,7 +2134,7 @@ async function pollOrder(env, o) {                      // -> {status, delivery?
       if (!data) return null;
       const st = String((data.order && data.order.status) || data.status || "").toUpperCase();
       const refunded = (data.order && data.order.is_refunded === true) || data.is_refunded === true;
-      if (refunded || /FAIL|REFUND|CANCEL/.test(st)) return { status: "failed", error: "G2Bulk က Order ကို မအောင်မြင်/Refund လုပ်လိုက်ပါတယ်" };
+      if (refunded || /FAIL|REFUND|CANCEL/.test(st)) return { status: "failed", error: "Provider က Order ကို မအောင်မြင်/Refund လုပ်လိုက်ပါတယ်" };
       if (st === "COMPLETED") return { status: "completed" };
       return null;
     }
@@ -2102,7 +2143,7 @@ async function pollOrder(env, o) {                      // -> {status, delivery?
       if (!url || (await g2Blocked())) return null;
       const res = await fetch(url, { headers: { "X-API-Key": env.G2BULK_KEY || "" }, signal: AbortSignal.timeout(15000) });
       if (res.status === 401) { await g2AuthFailed(env); return null; }
-      if (res.status === 410) return { status: "failed", error: "G2Bulk voucher order failed/refunded" };
+      if (res.status === 410) return { status: "failed", error: "Voucher order failed/refunded" };
       if (res.status !== 200) return null;
       const d = await res.json().catch(() => ({}));
       return Array.isArray(d.delivery_items) && d.delivery_items.length ? { status: "completed", delivery: d.delivery_items.map(itemText) } : null;
@@ -2112,7 +2153,7 @@ async function pollOrder(env, o) {                      // -> {status, delivery?
       const d = await res.json().catch(() => ({}));
       if (!d.ok) return null;
       const st = mapStatus(d.order && d.order.status);
-      return st === "processing" ? null : { status: st, ...(st === "failed" ? { error: "FazerCards order failed/refunded" } : {}) };
+      return st === "processing" ? null : { status: st, ...(st === "failed" ? { error: "Order failed/refunded" } : {}) };
     }
   } catch {}
   return null;
@@ -2127,7 +2168,7 @@ function orderVars(o) {
     id: esc(o.id), game: esc(o.game), server: esc(o.server || ""), title: esc(o.game) + (o.server ? " · " + esc(o.server) : ""),
     amount: esc(o.amount), price: fmt(o.price), pid: esc(o.pid || ""), sid: esc(o.sid || ""), sname,
     serverid: o.sid ? `<code>${esc(o.sid)}</code>${sname ? ` (${sname})` : ""}` : "", cname: esc(o.cname || ""), pname: esc(o.pname || ""),
-    provider: esc(o.plabel || ""), ref: esc(o.ref || ""), via: esc(o.plabel || "") + (o.ref ? ` · <code>${esc(o.ref)}</code>` : ""),
+    provider: "", ref: esc(o.ref || ""), via: o.ref ? `<code>${esc(o.ref)}</code>` : "",   // the provider name is never shown on a card
     codes: codes.join("\n"), codeblock: codes.length ? "<b>Code</b>\n" + codes.join("\n") : "",
     error: esc(o.error || ""), by: esc(o.by || ""), src: esc(o.src || ""), byline: esc(o.by || "") + (o.src ? ` · 👥 ${esc(o.src)}` : ""),
     date: dateMM(o.done || o.at), status: STATUS_LABEL[o.status] || "Processing",
@@ -2483,7 +2524,7 @@ function sampleCard(key) {                               // the card with sample
     return { text: "🔘 ခလုတ် Preview", markup: orderMarkup({ ...o, status: st, id: "PREVIEW" }) };
   }
   if (["proc", "done", "fail", "unk"].includes(key)) return { text: orderText(o), markup: orderMarkup({ ...o, id: "PREVIEW" }) };
-  if (key === "detail") return { text: tplOut("detail", detailVars({ title: "Mobile Legends · Global", amount: "86 Diamonds", price: 5200, pid: "123456789", sid: "2001", pname: "Player Name" }, "G2Bulk", "")), markup: { inline_keyboard: [[btn("✅ Confirm", "nop", "success")]] } };
+  if (key === "detail") return { text: tplOut("detail", detailVars({ title: "Mobile Legends · Global", amount: "86 Diamonds", price: 5200, pid: "123456789", sid: "2001", pname: "Player Name" }, "", "")), markup: { inline_keyboard: [[btn("✅ Confirm", "nop", "success")]] } };
   if (key === "quote" || key === "qrow") return { text: quoteSection("Mobile Legends", "Global", [{ amount: "86 Diamonds", qty: 1, unit: 5200 }, { amount: "Weekly Pass", qty: 2, unit: 6100 }]) };
   return { text: tplOut("ptable", { game: "Mobile Legends", server: "Global", title: "Mobile Legends · Global", label: "Diamond", part: "" }) };
 }
@@ -2743,7 +2784,9 @@ async function onPrivate(m, env) {
         const store = await loadStore(env);
         const g = store.groups ? (await abbrMap(store)).get(t.toLowerCase()) : null;
         if (g) {
-          const v = g.entries.length > 1 ? srvPickView(g, { pre: "zv", close: "zvx" }) : priceView(g, 0, 0, 0, { pre: "zv", update: true, close: "zvx" });
+          const og = store.byId.get(g.id) || g;
+          const v = g._ei !== undefined ? priceView(og, g._ei, 0, 0, { pre: "zv", update: true, close: "zvx" })
+            : priceView(g, 0, 0, 0, { pre: "zv", update: true, close: "zvx" });
           return sendView(env, chat, v);
         }
       }
