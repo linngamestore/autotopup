@@ -10,9 +10,18 @@ compatibility_date = "2025-09-01"
 [triggers]
 crons = ["*/5 * * * *"]
 
+# Old state store (KV). Keep it until /migrate has been run and the bot works on D1, then it can be removed.
 [[kv_namespaces]]
 binding = "STATE"
 id = "fca3c790aa724801b13142b0c146735b"
+
+# NEW: D1 state store (free plan = 100,000 row writes / day instead of KV's 1,000).
+# The bot uses it automatically when the binding is named exactly  DB.
+# Create it with:  npx wrangler d1 create linn-bot   -> paste the database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "linn_topup"
+database_id = "6ef9bc9a-1a47-4cf7-aee5-13232cd406a1"
 
 # Plain variables (not secret). Without them here, a git deploy can wipe the ones set in the dashboard.
 [vars]
