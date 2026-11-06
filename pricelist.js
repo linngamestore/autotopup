@@ -60,7 +60,8 @@ const FS_FIELDS = [
 ];
 const PAGE = 10;            // games per page (2 columns x 5 rows)
 const TABLE_CHUNK = 40;     // rows per table message
-const STORE_TTL_MS = 5 * 60 * 1000;
+const STORE_FRESH_MS = 3 * 1000;                         // price quotes / order steps / confirm never use data older than this
+const STORE_TTL_MS = 10 * 1000;                          // the store (prices / packages / providers) is re-read at most every 30 s (env.STORE_TTL_SEC = 5..600 to change) — it used to be 5 min, so a provider / price change showed up late
 
 let KV = null;
 /* ---------- D1 as the state store (instead of KV) ----------
@@ -140,6 +141,15 @@ async function tg(env, method, body) {
     ACKED.add(body.callback_query_id);
   }
   await spinGuard(method, body);                    // a spinning button steps aside before its message is edited / deleted
+  if (method === "sendMessage" || method === "editMessageText") {             // inline buttons go INSIDE the message (rich); any refusal -> the classic message below
+    let blocks = null;
+    try { blocks = richBlocksFor(method, body); } catch { blocks = null; }
+    if (blocks) {
+      const { text, parse_mode, reply_markup, disable_web_page_preview, link_preview_options, ...rest } = body;
+      const rj = await tg(env, method === "sendMessage" ? "sendRichMessage" : "editMessageText", { ...rest, rich_message: { blocks } }).catch(() => null);
+      if (rj && (rj.ok || /not modified/i.test(rj.description || ""))) return rj;
+    }
+  }
   let kbOrig = null;
   if (body?.reply_markup && Array.isArray(body.reply_markup.keyboard)) {   // menu (reply) keyboard: put the saved premium icons on the buttons
     await loadKbi().catch(() => {});
@@ -174,6 +184,151 @@ async function tg(env, method, body) {
     return j;
   }
 }
+
+/* ---------- Rich in-message buttons (Bot API rich messages) ----------
+   Every message that carries an inline keyboard is sent as a RICH message: the buttons sit INSIDE the message bubble
+   instead of hanging under it.  tg() does it for sendMessage / editMessageText, so every menu, list and step of the bot gets it
+   without touching the screens one by one.  Anything Telegram refuses (old client, unsupported shape) falls back to the classic
+   message + keyboard, so nothing is ever lost.
+   EDGES: every button row is padded (invisible Braille blanks, calibrated on a real phone - same model as the store bot) to the SAME
+   total width and every button of a row to the same share of it, so ALL rows share one left and one right edge.  A row whose labels
+   do not fit side by side is split into fewer columns (a lone button is full width) instead of being cut.
+   Cards with quote blocks / code blocks / premium emoji keep the classic keyboard (a rich message cannot show those faithfully):
+   set RICH_FLATTEN_QUOTE = true to convert the quote cards too (the quote box then becomes plain lines). */
+const RICH_INLINE_BUTTONS = true;
+const RICH_FLATTEN_QUOTE = false;
+const BTN_ROW_PX = 1010;
+const BTN_BUBBLE_PX = 970;
+const BTN_GAP_PX = 20;
+const BTN_ICON_PX = 33;   // extra width of the little arrow icon Telegram draws on url / web_app buttons
+const btnIconPx = (b) => (b && (b.url || b.web_app) ? BTN_ICON_PX : 0);
+const BTN_MIN_PAD_PX = 56;   // real minimum pill padding when Telegram squeezes a row (2 columns of "2195 — 129,150 Ks" must fit)
+const BTN_FILL = '\u2800';
+const BTN_PX_PER_EM = 44.3;
+const BTN_PAD2_PX = 77.5;
+const BTN_FILL_EM = 0.673;
+const BTN_SPACE_EM = 0.278;
+const BTN_EM_ASCII = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+const Q_MARKER_RE = /[\uE000-\uE003]/g;
+function btnEm(s) {
+  let w = 0;
+  for (const ch of Array.from(String(s || '').replace(Q_MARKER_RE, ''))) {
+    const c = ch.codePointAt(0);
+    if (ch === BTN_FILL) w += BTN_FILL_EM;
+    else if (c >= 32 && c <= 126) w += BTN_EM_ASCII[c - 32] / 1000;
+    else if (ch === '\u00b7') w += 0.333;
+    else if (ch === '\u2007') w += 0.556;
+    else if (ch === '\u2008') w += 0.278;
+    else if (ch === '\u2026' || ch === '\u2014') w += 1;
+    else if (c === 0x2022) w += 0.35;   // bullet
+    else if (c === 0x103c) w += 0.6;
+    else if (c === 0x103b) w += 0.5;
+    else if (c === 0x1031 || c === 0x102c || c === 0x102b || c === 0x1038) w += 0.22;
+    else if (/[\u102d-\u1030\u1032-\u103a\u103d\u103e\u1056-\u1059\u105e-\u1060\u1062-\u1064\u1067-\u106d\u1071-\u1074\u1082-\u108d\u108f\u109a-\u109d]/.test(ch)) continue;
+    else w += 0.9;
+  }
+  return w;
+}
+const btnNaturalPx = (b) => BTN_PX_PER_EM * btnEm(b && b.text) + BTN_PAD2_PX + btnIconPx(b);
+function padToEm(text, targetEm) {
+  const gap = targetEm - btnEm(text);
+  if (gap < 0.25) return text;
+  let k = Math.floor(gap / BTN_FILL_EM);
+  const rem = gap - k * BTN_FILL_EM;
+  let m = Math.round(rem / BTN_SPACE_EM);
+  if (Math.abs(BTN_FILL_EM - rem) < Math.abs(rem - m * BTN_SPACE_EM)) { k += 1; m = 0; }
+  if (k === 0) { if (gap < BTN_FILL_EM / 2) return text; k = 1; m = 0; }
+  const a = Math.ceil(k / 2), b = k - a;
+  const sl = b ? Math.ceil(m / 2) : m, sr = m - sl;
+  return BTN_FILL.repeat(a) + ' '.repeat(sl) + text + ' '.repeat(sr) + BTN_FILL.repeat(b);
+}
+function evenRows(rows) {
+  if (!Array.isArray(rows)) return rows;
+  const clean = (b) => (b && typeof b.text === 'string'
+    ? { ...b, text: b.text.replace(/^[\u2800 ]+|[\u2800 ]+$/g, '') || b.text } : b);   // drop filler from an earlier pass
+  const src = rows.map((r) => (Array.isArray(r) ? r.slice(0, 8).map(clean) : r));
+  const rowMax = src.map((r) => (Array.isArray(r) && r.length ? Math.max(...r.map(btnNaturalPx)) : 0));
+  return src.map((r, i) => {
+    if (!Array.isArray(r) || !r.length) return r;
+    const per = Math.max(rowMax[i], (BTN_ROW_PX - (r.length - 1) * BTN_GAP_PX) / r.length);
+    return r.map((b) => (b && typeof b.text === 'string'
+      ? { ...b, text: padToEm(b.text, (per - BTN_PAD2_PX - btnIconPx(b)) / BTN_PX_PER_EM) } : b));
+  });
+}
+const slotPx = (cols) => Math.floor((BTN_BUBBLE_PX - (cols - 1) * BTN_GAP_PX) / cols);
+// a row whose labels do not fit side by side is split into fewer columns (never cut, never uneven)
+function fitRows(rows) {
+  const out = [];
+  for (const r of rows) {
+    if (!Array.isArray(r) || !r.length) continue;
+    const row = r.slice(0, 8);
+    const widest = Math.max(...row.map((b) => btnEm(b && b.text) * BTN_PX_PER_EM));
+    let cols = row.length;
+    while (cols > 1 && widest > slotPx(cols) - BTN_MIN_PAD_PX) cols--;
+    for (let i = 0; i < row.length; i += cols) out.push(row.slice(i, i + cols));
+  }
+  return out;
+}
+const richBtn = (b) => { const { icon_custom_emoji_id, ...rest } = b || {}; return rest; };   // rich buttons have no premium icon
+function richButtonRows(rows) {
+  return evenRows(fitRows(rows)).map((row) => ({ type: "buttons", align: "center", buttons: row.map(richBtn) }));
+}
+const RICH_TAGS = { b: 'bold', strong: 'bold', i: 'italic', em: 'italic', u: 'underline', ins: 'underline', s: 'strikethrough', strike: 'strikethrough', del: 'strikethrough', code: 'code', 'tg-spoiler': 'spoiler' };
+function htmlToRichBlocks(html) {
+  if (/<pre[\s>]/i.test(html)) return null;
+  if (!RICH_FLATTEN_QUOTE && /<blockquote[\s>]/i.test(html)) return null;   // quote cards stay classic
+  const dec = (t) => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  const conv = (n) => {
+    const kids = n.arr.map(x => (typeof x === 'string' ? x : conv(x))).filter(x => x !== '' && x !== null);
+    const inner = kids.length === 1 ? kids[0] : kids;
+    if (!kids.length) return '';
+    if (RICH_TAGS[n.tag]) return { type: RICH_TAGS[n.tag], text: inner };
+    if (n.tag === 'a') return n.href ? { type: 'url', text: inner, url: n.href } : inner;
+    return inner; // blockquote / span
+  };
+  const blocks = [];
+  let carry = [];
+  for (const line of html.split('\n')) {
+    const root = { tag: '', arr: [] };
+    const chain = [root];
+    const open = (tag, href) => { const n = { tag, href, arr: [] }; chain[chain.length - 1].arr.push(n); chain.push(n); };
+    carry.forEach(c => open(c.tag, c.href));
+    const toks = line.match(/<\/?[a-zA-Z][^>]*>|[^<]+|</g) || [];
+    for (const tk of toks) {
+      if (tk[0] === '<' && tk.length > 1) {
+        const m = tk.match(/^<(\/?)([a-zA-Z-]+)([^>]*)>$/);
+        if (!m) return null;
+        const tag = m[2].toLowerCase();
+        if (!(RICH_TAGS[tag] || tag === 'a' || tag === 'blockquote' || tag === 'span')) return null;
+        if (m[1]) { if (chain.length > 1 && chain[chain.length - 1].tag === tag) chain.pop(); }
+        else {
+          const h = m[3].match(/href\s*=\s*"([^"]*)"/i);
+          open(tag, h ? dec(h[1]) : '');
+        }
+      } else chain[chain.length - 1].arr.push(dec(tk));
+    }
+    carry = chain.slice(1).map(n => ({ tag: n.tag, href: n.href }));
+    const out = conv(root);
+    if (out !== '' && !(typeof out === 'string' && !out.trim())) blocks.push({ type: 'paragraph', text: out });
+  }
+  return blocks.length ? blocks : null;
+}
+// the rich blocks for a sendMessage / editMessageText payload, or null = send it the classic way
+function richBlocksFor(method, body) {
+  if (!RICH_INLINE_BUTTONS || !body || body.rich_message || body.entities) return null;
+  const rows = body.reply_markup && body.reply_markup.inline_keyboard;
+  if (!Array.isArray(rows) || typeof body.text !== "string" || !body.text.trim()) return null;
+  if (!rows.length && method !== "editMessageText") return null;           // a new message without buttons stays a normal message
+  if (body.parse_mode && String(body.parse_mode).toLowerCase() !== "html") return null;
+  const flat = rows.flat();
+  if (flat.some((b) => b && (b.copy_text || b.icon_custom_emoji_id || b.switch_inline_query !== undefined || b.switch_inline_query_current_chat !== undefined))) return null;
+  let blocks;
+  if (body.parse_mode) { blocks = htmlToRichBlocks(body.text); if (!blocks) return null; }
+  else blocks = body.text.split("\n").filter((x) => x.trim()).map((x) => ({ type: "paragraph", text: x }));
+  if (!blocks.length) return null;
+  return [...blocks, ...richButtonRows(rows)];
+}
+
 /* ---------- Button spinner ----------
    When a tapped button's work takes longer than ~0.4 s, the button itself turns into a rotating spinner
    ("⠋ Confirm" -> "⠙ Confirm" -> ...) so the user can see the tap was received. The pressed button goes inert
@@ -214,7 +369,7 @@ function startButtonSpinner(token, cb, opts = {}) {
     const call = (n) => {                                // n = frame number, or null = put the original buttons back
       const f = mapBtn(n);
       const body = rich
-        ? { chat_id, message_id, rich_message: { blocks: rich.blocks.map((b) => (isBtns(b) ? { ...b, buttons: b.buttons.map(f) } : b)) } }
+        ? { chat_id, message_id, rich_message: { blocks: rich.blocks.map((b) => (isBtns(b) ? { ...b, buttons: evenRows([b.buttons.map(f)])[0] } : b)) } }
         : { chat_id, message_id, reply_markup: { inline_keyboard: kb.map((row) => row.map(f)) } };
       return fetch(`https://api.telegram.org/bot${token}/${rich ? "editMessageText" : "editMessageReplyMarkup"}`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -326,11 +481,19 @@ const providerFamily = (g) => {
 };
 
 let STORE = { t: 0, groups: null, byId: new Map() };
-async function loadStore(env, force = false) {
-  if (!force && STORE.groups && Date.now() - STORE.t < STORE_TTL_MS) return STORE;
+let STORE_LOADING = null;                           // one Firestore read is shared by every caller that asks while it is running
+// force = read again now.  maxAge (ms) = accept the cached store only if it is at most this old (default STORE_TTL_MS).
+async function loadStore(env, force = false, maxAge) {
+  const ttl = maxAge !== undefined ? maxAge : (Number(env.STORE_TTL_SEC) >= 3 && Number(env.STORE_TTL_SEC) <= 600 ? Number(env.STORE_TTL_SEC) * 1000 : STORE_TTL_MS);
+  if (!force && STORE.groups && Date.now() - STORE.t < ttl) return STORE;
+  if (STORE_LOADING) return STORE_LOADING;
+  STORE_LOADING = loadStoreNow(env).finally(() => { STORE_LOADING = null; });
+  return STORE_LOADING;
+}
+async function loadStoreNow(env) {
   const key = env.FIREBASE_API_KEY || FS_KEY;
   const docs = [];
-  let token = "";
+  let token = "", complete = true;
   for (let i = 0; i < 10; i++) {
     const qs = new URLSearchParams({ pageSize: "300", key });
     FS_FIELDS.forEach((f) => qs.append("mask.fieldPaths", f));
@@ -338,9 +501,9 @@ async function loadStore(env, force = false) {
     let j;
     try {
       const r = await fetch(`${FS_BASE}/games?${qs}`);
-      if (!r.ok) break;
+      if (!r.ok) { complete = false; break; }
       j = await r.json();
-    } catch { break; }
+    } catch { complete = false; break; }
     (j.documents || []).forEach((d) => {
       const g = fv({ mapValue: { fields: d.fields || {} } });
       g._id = String(d.name || "").split("/").pop();
@@ -349,7 +512,7 @@ async function loadStore(env, force = false) {
     token = j.nextPageToken || "";
     if (!token) break;
   }
-  if (!docs.length) return STORE;                    // keep the old data when the fetch failed
+  if (!docs.length || !complete) return STORE;       // a failed / half-finished read never replaces the last good store (a half list = missing games and old prices)
 
   let flags = {};                                    // games of a provider that is switched off in admin are hidden in the store too
   try {
@@ -412,7 +575,7 @@ const TPL_DEF = {
   ptable: "🎮 {title}\n📂 {label}{part}",
   b_done: "✅ Completed", b_fail: "❌ Failed", b_proc: "⏳ Processing", b_check: "🔄 Status စစ်", b_unk: "⚠️ မသေချာ — Provider မှာစစ်ပါ", b_again: "🛒 ထပ်ဝယ်မယ်",
 };
-const TPL_BTN_KEYS = ["b_done", "b_fail", "b_proc", "b_check", "b_unk", "b_again"];   // plain-text button labels of the order card
+const TPL_BTN_KEYS = ["b_done", "b_fail", "b_proc", "b_check", "b_unk"];   // plain-text button labels of the order card
 const TPL_KEYS = ["proc", "done", "fail", "unk", "detail", "quote", "qrow", "ptable"];
 const TPL_LABEL = {
   proc: "⏳ Order လုပ်ဆောင်နေ card", done: "✅ Order ပြီးစီး card", fail: "❌ Reject / မအောင်မြင် card", unk: "⚠️ မသေချာ card",
@@ -559,7 +722,7 @@ function tabsOf(entry) {
   const order = ["currency", "package", ...seen.filter((t) => t !== "currency" && t !== "package")].filter((t) => seen.includes(t));
   const label = (t) => (t === "package" ? entry.labels.package || "Package" : t === "currency" ? entry.labels.currency || "Currency" : t);
   const mark = (p) => (p.badge === "hot" ? " 🔥" : p.badge === "top" ? " ⭐" : "");
-  const price = (p) => (p.price === undefined || p.price === null || p.price === "" ? "-" : Number(p.price).toLocaleString("en-US"));
+  const price = (p) => (hasPrice(p) ? priceOf(p).toLocaleString("en-US") : "-");
   return order.map((t) => ({
     label: label(t), key: t,
     rows: entry.packages.filter((p) => tabOf(p) === t).map((p) => [String(p.amount ?? "-") + mark(p), price(p)]),
@@ -680,7 +843,7 @@ function priceView(group, ei, ti, pg, o) {                // o: { pre: callback 
   const head = isPlainTpl(tplNow().ptable) ? `<b>${esc(htmlToText(html))}</b>` : html;
   const part = tab.rows.slice(pg * PV_ROWS, pg * PV_ROWS + PV_ROWS);
   const table = boxTable(["Package", "Price (MMK)"], part);
-  const rich = [rbPara(htmlToText(html)), rbTable(["Package", "Price (MMK)"], part), ...rows.map((r) => ({ type: "buttons", buttons: r }))];   // table + buttons = one message
+  const rich = [rbPara(htmlToText(html)), rbTable(["Package", "Price (MMK)"], part), ...richButtonRows(rows)];   // table + buttons = one message, rows padded to one common width
   return { text: `${head}\n<pre>${esc(table)}</pre>`, markup: { inline_keyboard: rows }, rich };
 }
 // A view that carries "rich" is sent / edited as a rich message (bordered table, buttons inside it); if Telegram refuses, the old text + inline keyboard is used.
@@ -728,6 +891,49 @@ function menuView(store, allowed, kind, page) {
   rows.push([{ text: "❌ ပိတ်", callback_data: "x", style: "danger" }]);
   return { kind, text: `📋 <b>Price List</b> — ${kind === "t" ? "💎 Top Up" : "🎟 Voucher"}\nGame ရွေးပါ 👇`, markup: { inline_keyboard: rows } };
 }
+/* "ml list" / "list ml" (abbreviation + list word) in a group -> the WHOLE price list of that one game (default server, no server name) as a
+   copy-ready text: it sits in a code block (one tap on it copies everything) and a 📋 Copy button copies it too when it fits Telegram's
+   256-character limit for copy buttons.  Only the games this group may see; anything else falls through to the normal Price List menu. */
+const LIST_CMD = /^(?:([\p{L}\p{N}_.-]{2,12})\s+(?:list|lists|price|prices|pricelist)|(?:list|lists|price|prices|pricelist)\s+([\p{L}\p{N}_.-]{2,12}))$/iu;
+function gameListText(group, entry) {
+  const tabs = tabsOf(entry), lines = [group.name];
+  for (const t of tabs) {
+    if (tabs.length > 1) lines.push("", `【${t.label}】`);
+    for (const [a, p] of t.rows) lines.push(`${a} = ${p}${p === "-" ? "" : " Ks"}`);
+  }
+  return lines;
+}
+async function gameListCommand(env, m, text, priv) {      // true = answered.  priv = an admin in the bot's private chat (every game of the groups, all games if no group is set yet)
+  const mt = LIST_CMD.exec(mmDigits(text || "").trim().toLowerCase());
+  if (!mt) return false;
+  const alias = mt[1] || mt[2], chat = m.chat.id;
+  let allowed;
+  if (priv) { const sg = await allGroupGames(env); allowed = sg.size ? [...sg] : null; }
+  else allowed = await getAllowed(chat);
+  if (allowed && !allowed.length) return false;
+  const store = await loadStore(env, false, STORE_FRESH_MS);   // a copy-list is never older than a few seconds
+  if (!store.groups) return false;
+  const g = (await abbrMap(store)).get(alias);
+  if (!g || (allowed && !allowed.includes(g.key))) return false;
+  const now = Date.now();
+  if (now - (COOL.get("l" + chat) || 0) < 2500) return true;
+  COOL.set("l" + chat, now);
+  const entry = g.entries[0], lines = gameListText(g, entry);
+  if (lines.length < 2) { const r = await send(env, chat, `<b>🎮 ${esc(g.name)}</b>\nPackage မရှိသေးပါ`, replyTo(m.message_id)); await scheduleDelete(env, chat, r?.result?.message_id, priceMs(env)); return true; }
+  const chunks = [];
+  let cur = [];
+  for (const l of lines) { if (cur.length && cur.join("\n").length + l.length > 3000) { chunks.push(cur); cur = []; } cur.push(l); }
+  if (cur.length) chunks.push(cur);
+  for (let i = 0; i < chunks.length; i++) {
+    const body = chunks[i].join("\n");
+    const row = [];
+    if (body.length <= 256) row.push({ text: "📋 Copy", copy_text: { text: body }, style: "success" });
+    row.push({ text: "❌ ပိတ်", callback_data: priv ? "zvx" : "x", style: "danger" });
+    const r = await send(env, chat, `<pre>${esc(body)}</pre>`, { ...(i === 0 ? replyTo(m.message_id) : {}), reply_markup: { inline_keyboard: [row] }, disable_web_page_preview: true });
+    await scheduleDelete(env, chat, r?.result?.message_id, priceMs(env));
+  }
+  return true;
+}
 const COOL = new Map();
 const PRICE_RE = /\b(list|lists|price|prices|pricelist|game|games|rate|rates|mmk)\b|ဈေး|ဘယ်လောက်/i;   // any price-related word brings the list
 const NOTICE = new Map();
@@ -750,6 +956,7 @@ async function onGroupMessage(m, env) {
     const r = await send(env, chat, "📩 Admin — Bot ကို private မှာ <b>Start</b> အရင်နှိပ်ပြီး ပြန်ခေါ်ပါ", { reply_markup: { inline_keyboard: [[{ text: "▶️ Bot ကို Start", url: `https://t.me/${await botName(env)}?start=admin` }]] } });
     return scheduleDelete(env, chat, r?.result?.message_id, 30 * 1000);
   }
+  if (await gameListCommand(env, m, text)) return;   // "ml list" -> that game's whole list, ready to copy
   const uid = m.from?.id || 0;
   if (uid && isAdmin(env, uid)) {                   // admin: reply to the bot's card (ID / Character), or type "ID + amount" to order
     if (await groupAdminText(env, m)) return;
@@ -1036,6 +1243,10 @@ const FZ = "https://api.fzr.cards/api/v2";
 const PKG_PAGE = 12;
 const SRV_PAGE = 12;
 const fmt = (n) => Number(n || 0).toLocaleString("en-US");
+// ONE way to read a package price (the store / admin page / store bot all use the number saved in the game document):
+// "5,200" or " 5200 " saved as text still gives 5200, so no screen ever shows NaN / 0 / a different number than the store.
+const priceOf = (p) => { const n = Number(String(p && p.price != null ? p.price : "").replace(/[,\s]/g, "")); return Number.isFinite(n) ? n : 0; };
+const hasPrice = (p) => p && p.price !== undefined && p.price !== null && String(p.price).trim() !== "";
 const cut = (s, n) => String(s).slice(0, n);
 // A button label saved from the bot may start with "[[ce:<custom emoji id>]] " = a premium emoji shown before the text (Bot API icon_custom_emoji_id).
 const CE_RE = /^\[\[ce:(\d{5,30})\]\]\s*/;
@@ -1218,7 +1429,7 @@ function pkgView(store, ss) {
     rows.push(slice.slice(i, i + 2).map((pi) => {
       const p = entry.packages[pi];
       const mark = p.badge === "hot" ? " 🔥" : p.badge === "top" ? " ⭐" : "";
-      const price = p.price === undefined || p.price === null || p.price === "" ? "-" : fmt(p.price);
+      const price = hasPrice(p) ? fmt(priceOf(p)) : "-";
       return btn(`${p.amount ?? "-"}${mark} · ${price}`, `zp:${pi}`, "primary");
     }));
   if (pages > 1) rows.push(pagerRow(page, pages, (n) => `zt:${ti}:${n}`));
@@ -1325,7 +1536,7 @@ async function pickPackage(env, chat, ss, store, pi, pre) {
   const { group, entry } = ctxOf(store, ss);
   const pkg = entry && entry.packages[pi];
   if (!pkg) return false;
-  ss.pi = pi; ss.title = group.name + (entry.server ? ` · ${entry.server}` : ""); ss.amount = String(pkg.amount ?? "-"); ss.price = Number(pkg.price) || 0;
+  ss.pi = pi; ss.title = group.name + (entry.server ? ` · ${entry.server}` : ""); ss.amount = String(pkg.amount ?? "-"); ss.price = priceOf(pkg);
   ss.pid = ""; ss.sid = ""; ss.sname = ""; ss.cname = ""; ss.pname = ""; ss.err = ""; ss.warn = ""; ss.srvOpts = null; ss.spage = 0;
   if (pre) { ss.pid = pre.pid || ""; ss.sid = pre.sid || ""; }
   const rq = reqOf(entry);
@@ -1359,7 +1570,7 @@ async function adminText(env, m) {                      // admin typed the Playe
   const ss = await getSS(uid);
   if (!ss || !["id", "char"].includes(ss.step)) return false;
   if (ss.chat && ss.chat !== chat) return false;
-  const store = await loadStore(env);
+  const store = await loadStore(env, false, STORE_FRESH_MS);
   if (!store.groups) return false;
   const t = String(m.text || "").trim();
   delMsg(env, chat, m.message_id);
@@ -1453,7 +1664,7 @@ async function abbrMap(store) {                          // alias -> game  (ml =
   return out;
 }
 async function abbrCommand(env, chat, t) {               // owner: /abbr  |  /abbr ml = mobile legends  |  /abbr del ml
-  const store = await loadStore(env);
+  const store = await loadStore(env, false, STORE_FRESH_MS);
   if (!store.groups) return send(env, chat, "⚠ Store data မရနိုင်သေးပါ");
   const body = t.replace(/^\/abbr(@\w+)?/i, "").trim();
   const custom = (await KV.get("abbr:all", "json").catch(() => null)) || {};
@@ -1622,7 +1833,7 @@ function batchLines(units) {                              // the batch card list
   for (const u of units) {
     const k = u.group.id + "|" + u.entry.id + "|" + u.entry.packages.indexOf(u.pkg);
     if (!by.has(k)) by.set(k, { game: u.group.name, server: u.entry.server, amount: String(u.pkg.amount ?? "-"), n: 0, sum: 0 });
-    const v = by.get(k); v.n++; v.sum += Number(u.pkg.price) || 0;
+    const v = by.get(k); v.n++; v.sum += priceOf(u.pkg);
   }
   const rows = [...by.values()].slice(0, 12).map((v) => `🎮 ${esc(v.game)}${v.server ? " · " + esc(v.server) : ""}\n    ${esc(v.amount)}${v.n > 1 ? ` <b>×${v.n}</b>` : ""} — <code>${fmt(v.sum)}</code> Ks`);
   return rows.join("\n") + (by.size > 12 ? `\n… +${by.size - 12}` : "");
@@ -1630,7 +1841,7 @@ function batchLines(units) {                              // the batch card list
 async function autoBuy(env, m, inGroup) {                // true = the message was an order (bought or refused with a reason)
   const uid = m.from?.id, chat = m.chat.id, text = mmDigits(m.text).trim();
   if (!uid || !text || text.length > 800 || text.startsWith("/")) return false;
-  const store = await loadStore(env);
+  const store = await loadStore(env, false, STORE_FRESH_MS);
   if (!store.groups) return false;
   let pool = store.groups;
   const hint = async (msg) => {                          // an admin who typed something that looks like an order is never left without an answer
@@ -1734,7 +1945,7 @@ async function autoBuy(env, m, inGroup) {                // true = the message w
     if (inGroup) await scheduleDelete(env, chat, r?.result?.message_id, 90 * 1000);
     return true;
   }
-  const total = units.reduce((n, u) => n + (Number(u.pkg.price) || 0), 0), why = await needConfirm(env, units, total);
+  const total = units.reduce((n, u) => n + priceOf(u.pkg), 0), why = inGroup ? [] : await needConfirm(env, units, total);   // in a group: never a Confirm step (only a big batch in the bot's private chat still asks)
   if (why.length) return askConfirm(env, m, inGroup, units, total, why);      // big / risky batch: nothing is bought until ✅ is tapped
   return runBatch(env, m, inGroup, units);
 }
@@ -1745,7 +1956,7 @@ async function needConfirm(env, units, total) {          // -> [reason lines]  (
   if (lim > 0 && total > lim) why.push(`💰 စုစုပေါင်း ${fmt(total)} Ks — ${fmt(lim)} Ks ထက် များနေပါတယ်`);
   const rate = Number(env.MMK_PER_USD);                  // optional: lets the bot compare the batch with the API balance
   if (rate > 0) {
-    const g2 = units.filter((u) => /^(g2bulk|voucher)$/.test(u.pv.key)).reduce((n, u) => n + (Number(u.pkg.price) || 0), 0);
+    const g2 = units.filter((u) => /^(g2bulk|voucher)$/.test(u.pv.key)).reduce((n, u) => n + priceOf(u.pkg), 0);
     if (g2 > 0) { const b = await g2Balance(env); if (b !== null && g2 / rate > b) why.push(`⚠ API Balance ${b.toFixed(2)} USD — ရောင်းဈေးအရ ≈ ${(g2 / rate).toFixed(2)} USD လိုနိုင်ပါတယ် (ဝယ်ရင်းက ပိုနည်းနိုင်)`); }
   }
   return why;
@@ -1769,21 +1980,29 @@ async function runBatch(env, m, inGroup, units) {         // the checked units a
   const bal = units.some((u) => /^(g2bulk|voucher)$/.test(u.pv.key)) ? await g2Balance(env) : null;
   if (bal !== null && bal <= 0) { await send(env, chat, `<b>✗ မဝယ်ရသေးပါ</b>\nAPI Balance မရှိတော့ပါ (<code>${bal.toFixed(2)} USD</code>) — အရင်ဖြည့်ပါ`, rt); return true; }
   const f = m.from, by = [f.first_name, f.last_name].filter(Boolean).join(" ") || f.username || String(uid);
+  const kinds = [...new Set(units)];                       // the same package for the same ID (wp2, 86x3 ...) = ONE card, however many units
   const bl = units.length > 1 ? batchLines(units) : "";
-  const head = units.length > 1 ? await send(env, chat, `<b>Batch</b>  ${units.length} orders\n${LINE}\n${bl}\n${LINE}\n<code>Total  </code> <b>${fmt(units.reduce((n, u) => n + (Number(u.pkg.price) || 0), 0))} MMK</b>`, rt) : null;
+  const head = kinds.length > 1 ? await send(env, chat, `<b>Batch</b>  ${units.length} orders\n${LINE}\n${bl}\n${LINE}\n<code>Total  </code> <b>${fmt(units.reduce((n, u) => n + priceOf(u.pkg), 0))} MMK</b>`, rt) : null;
   const list = [];
-  for (let i = 0; i < units.length; i++) {
-    const u = units[i];
-    const o = {
-      id: "A" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase(),
-      idem: await idemKey(uid, { mid: m.message_id + "#" + i, gid: u.group.id, ei: 0, pi: u.entry.packages.indexOf(u.pkg), pid: u.pid, sid: u.sid, cname: u.entry.id, price: u.pkg.price }),
-      uid, by, src: inGroup ? String(m.chat.title || "") : "", chat, game: u.group.name, server: u.entry.server, amount: String(u.pkg.amount ?? "-"), price: Number(u.pkg.price) || 0,
-      pid: u.pid, sid: u.sid, sname: u.sname, cname: "", pname: u.pname, provider: u.pv.key, plabel: u.pv.label, status: "placing", ref: "", at: Date.now(),
-    };
-    const r = await send(env, chat, orderText(o), { reply_markup: orderMarkup(o), disable_web_page_preview: true, ...(units.length === 1 ? rt : {}) });
-    o.mid = r?.result?.message_id || 0;
-    await saveOrder(o);                                  // written BEFORE the provider is called
-    list.push({ o, u });
+  let idx = 0;
+  for (const u of kinds) {
+    const n = units.filter((x) => x === u).length, grp = [];
+    for (let k = 0; k < n; k++, idx++) {
+      grp.push({
+        id: "A" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase() + k,
+        idem: await idemKey(uid, { mid: m.message_id + "#" + idx, gid: u.group.id, ei: 0, pi: u.entry.packages.indexOf(u.pkg), pid: u.pid, sid: u.sid, cname: u.entry.id, price: u.pkg.price }),
+        uid, by, src: inGroup ? String(m.chat.title || "") : "", chat, game: u.group.name, server: u.entry.server, amount: String(u.pkg.amount ?? "-"), price: priceOf(u.pkg),
+        pid: u.pid, sid: u.sid, sname: u.sname, cname: "", pname: u.pname, provider: u.pv.key, plabel: u.pv.label, status: "placing", ref: "", at: Date.now(),
+      });
+    }
+    if (grp.length > 1) grp.forEach((o) => { o.sib = grp.map((x) => x.id); OMEM.set(o.id, o); });
+    const card = await groupCard(grp[0]);
+    const r = await send(env, chat, card.text, { reply_markup: card.markup, disable_web_page_preview: true, ...(kinds.length === 1 ? rt : {}) });
+    for (const o of grp) {
+      o.mid = r?.result?.message_id || 0;                // all units of one card share its message
+      await saveOrder(o);                                // written BEFORE the provider is called
+      list.push({ o, u });
+    }
   }
   for (let i = 0; i < list.length; i += 4)               // 4 at a time
     await Promise.all(list.slice(i, i + 4).map(async ({ o, u }) => {
@@ -1795,6 +2014,11 @@ async function runBatch(env, m, inGroup, units) {         // the checked units a
   await fastWatch(env, list.map((x) => x.o)).catch(() => {});      // Processing cards finish by themselves
   if (head?.result?.message_id) {                        // the batch header turns into the result summary
     const n = (st) => list.filter(({ o }) => o.status === st).length, done = n("completed"), bad = n("failed"), unk = n("unknown"), open = list.length - done - bad - unk;
+    if (inGroup && done === list.length) {                // every unit succeeded: the "Batch N orders" summary is not needed any more -> it disappears by itself (the order cards stay)
+      await tg(env, "deleteMessage", { chat_id: chat, message_id: head.result.message_id }).catch(() => {});
+      await watchBalance(env).catch(() => {});
+      return true;
+    }
     const paid = list.filter(({ o }) => o.status !== "failed").reduce((t, { o }) => t + (Number(o.price) || 0), 0);
     const rows = [`<code>Done   </code> ✓ ${done}`, open ? `<code>Open   </code> ◌ ${open}` : "", bad ? `<code>Failed </code> ✗ ${bad}` : "", unk ? `<code>Unknown</code> ! ${unk}` : ""].filter(Boolean);
     await tg(env, "editMessageText", { chat_id: chat, message_id: head.result.message_id, parse_mode: "HTML", text: `<b>Batch</b>  ${units.length} orders\n${LINE}\n${bl}\n${LINE}\n${rows.join("\n")}\n${LINE}\n<code>Total  </code> <b>${fmt(paid)} MMK</b>` }).catch(() => {});
@@ -1872,7 +2096,7 @@ async function statusCard(env, m, inGroup, g, pid, sidArg) {   // always true: t
   return true;
 }
 async function chkParse(env, m, inGroup, body) {         // "ml 1159045022 13678" -> { g, pid, sid } | error text
-  const store = await loadStore(env);
+  const store = await loadStore(env, false, STORE_FRESH_MS);
   if (!store.groups) return { err: "⚠ Store data မရနိုင်သေးပါ" };
   let pool = store.groups;
   if (inGroup) { const al = await getAllowed(m.chat.id); pool = pool.filter((x) => al.includes(x.key)); }
@@ -1994,7 +2218,7 @@ function quoteHtml(pool, items) {
     }
   }
   const html = [...sections.values()].map((sec) => quoteSection(sec.group.name, sec.entry.server, sec.lines.map(({ p, qty }) => {
-    const unit = Number(p.price), ok = p.price !== undefined && p.price !== null && p.price !== "" && Number.isFinite(unit);
+    const unit = priceOf(p), ok = hasPrice(p) && Number.isFinite(unit);
     return { amount: String(p.amount ?? "-"), qty, unit: ok ? unit : null };      // the price is always the store's current price
   })));
   return { html: html.join("\n\n"), warn, found: sections.size };
@@ -2033,7 +2257,7 @@ async function priceQuote(env, m, priv) {               // true = answered.  pri
   const chat = m.chat.id, text = mmDigits(m.text).trim();
   if (!text || text.length > 120 || text.startsWith("/")) return false;
   if (/\d{8,}/.test(text.replace(/[\s,.\-]/g, ""))) return false;          // a Player ID / phone number in the message = an order line, never a price question
-  const store = await loadStore(env);
+  const store = await loadStore(env, false, STORE_FRESH_MS);
   if (!store.groups) return false;
   let pool;
   if (priv) { const s = await allGroupGames(env); pool = store.groups.filter((g) => !s.size || s.has(g.key)); }   // private: the games of all groups (all games if no group is set yet)
@@ -2185,15 +2409,18 @@ function orderMarkup(o) {
   else if (o.status === "failed") rows.push([btn(T.b_fail, "nop", "danger")]);
   else if (o.status === "unknown") rows.push([btn(T.b_unk, "nop")]);
   else rows.push([btn(T.b_proc, "nop"), btn(T.b_check, `zr:${o.id}`, "primary")]);
-  if (o.status !== "processing") rows.push([btn(T.b_again, "zn", "primary"), ...(o.status === "completed" && !o.cname ? [btn("🔁 ထပ်ဝယ်", `zrb:${o.id}`)] : [])]);
   return { inline_keyboard: rows };
 }
 // KV SAVING: o.fo / o.fr = "the open: / ref: key already exists", o.odS = status last written to the daily report.
 // So each helper key is written once and deleted once per order (before: rewritten / re-deleted on every save).
 // "placing" orders are tracked by the same open: key (no pend: / pendany keys any more): pollOpenOrders marks a stuck one Unknown.
-/* ---------- Mirror finished bot orders into the store's Firestore `orders` (so the admin dashboard lists them) ----------
+/* ---------- Mirror bot orders into the store's Firestore `orders` (so the admin dashboard lists them) ----------
    Needs the Worker secret FIREBASE_SA = the service-account JSON of the Firebase project (Firebase console -> Project settings -> Service accounts).
-   Only Success / Fail are written, never Pending / Processing, so the admin panel can never "Start Processing" (= buy again) a bot order. */
+   Written to the admin panel:  Processing (bought, provider not finished yet / Unknown = check the provider)  ->  Success / Fail.
+   NEVER "Pending", so the admin panel can never "Start Processing" (= buy again) a bot order, and the provider order id of an open order
+   is kept in botRef (not g2bulkOrderId / fazercardOrderId) so the store worker and the admin page do not poll the same provider order a second time.
+   Only the fields written here are touched (updateMask): admin-side fields (adminCleared, pushNotifiedStatus ...) survive every later update.
+   A failed write is never silent: the owners get a message (at most every 6 h) and the order is retried every minute (KV "fsq:<id>"). */
 let ENVX = null, FS_TOK = { v: "", exp: 0 };
 const b64u = (x) => btoa(typeof x === "string" ? x : String.fromCharCode(...new Uint8Array(x))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 async function fsToken(env) {
@@ -2209,28 +2436,72 @@ async function fsToken(env) {
   FS_TOK = { v: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
   return FS_TOK.v;
 }
+const FS_ST = { processing: "Processing", unknown: "Processing", completed: "Success", failed: "Fail" };   // "placing" = not written yet
+async function fsWarn(env, text) {                       // tell the owners once per 6 h that the admin panel is not getting the orders
+  if (!KV || (await KV.get("fs:warn").catch(() => null))) return;
+  await KV.put("fs:warn", "1", { expirationTtl: 6 * 3600 }).catch(() => {});
+  for (const id of new Set([...idList(env.OWNER_IDS), ...idList(env.LOG_CHAT_ID)])) await send(env, id, text).catch(() => {});
+}
 async function mirrorOrder(env, o) {                     // true = written
-  if (!env.FIREBASE_SA) return false;
+  if (!FS_ST[o.status]) return true;                     // placing: nothing to show yet
+  if (!env.FIREBASE_SA) {
+    await fsWarn(env, "<b>⚠️ Admin Panel ကို Order မပို့နိုင်ပါ</b>\nWorker secret <code>FIREBASE_SA</code> (Firebase service-account JSON) မထည့်ရသေးပါ\nထည့်ပြီးရင် မပို့ရသေးတဲ့ Order တွေ ကိုယ်တိုင် ပြန်ပို့ပါမယ်");
+    return false;
+  }
   const str = (v) => ({ stringValue: String(v ?? "") }), ts = (ms) => ({ timestampValue: new Date(ms).toISOString() });
+  const open = o.status === "processing" || o.status === "unknown";
   const f = {
     game: str(o.game), itemAmount: str(o.amount), price: { integerValue: String(Math.round(Number(o.price) || 0)) }, quantity: { integerValue: "1" },
-    status: str(o.status === "completed" ? "Success" : "Fail"), paymentMethod: str("Telegram Bot"), source: str("bot"), botOrder: { booleanValue: true },
-    userName: str(o.by || "Bot"), userId: str("bot:" + o.uid), playerId: str(o.pid), timestamp: ts(o.at || Date.now()), confirmedAt: ts(o.done || Date.now()),
+    status: str(FS_ST[o.status]), paymentMethod: str("Telegram Bot"), source: str("bot"), botOrder: { booleanValue: true }, botStatus: str(o.status),
+    userName: str(o.by || "Bot"), userId: str("bot:" + o.uid), playerId: str(o.pid), timestamp: ts(o.at || Date.now()),
   };
+  if (!open) f.confirmedAt = ts(o.done || Date.now());
   if (o.sid) f.serverId = str(o.sid);
   if (o.server) f.serverRegion = str(o.server);
   if (o.pname || o.cname) f.inGameName = str(o.pname || o.cname);
   if (o.src) f.botSource = str(o.src);
-  if (o.ref) f[o.provider === "fazercard" ? "fazercardOrderId" : "g2bulkOrderId"] = str(o.ref);
-  if (o.status === "failed" && o.error) f.statusNote = str(o.error);
+  if (o.ref) f[open ? "botRef" : o.provider === "fazercard" ? "fazercardOrderId" : "g2bulkOrderId"] = str(o.ref);
+  if (o.provider) f.botProvider = str(o.plabel || o.provider);
+  const note = o.status === "unknown" ? "⚠️ Provider ဆီ Order ဝင်/မဝင် မသေချာပါ — Provider မှာ စစ်ပြီးမှ Mark Success / Mark Fail လုပ်ပါ (ထပ်မဝယ်ပါနဲ့)"
+    : o.status === "processing" ? "🤖 Bot order — provider က မပြီးသေးပါ" + (o.ref ? " (ref " + o.ref + ")" : "") : o.status === "failed" && o.error ? o.error : "";
+  if (note) f.statusNote = str(note);
   if (Array.isArray(o.delivery) && o.delivery.length) f.deliveredCodes = { arrayValue: { values: o.delivery.map((x) => str(x)) } };
-  Object.keys(f).forEach((k) => f[k] === undefined && delete f[k]);
-  const r = await fetch(`${FS_BASE}/orders/bot_${encodeURIComponent(o.id)}`, { method: "PATCH", headers: { authorization: "Bearer " + (await fsToken(env)), "content-type": "application/json" }, body: JSON.stringify({ fields: f }) });
-  if (!r.ok) console.error("mirrorOrder", r.status, (await r.text()).slice(0, 200));
+  const mask = new Set(Object.keys(f));
+  ["statusNote", "confirmedAt", "botRef"].forEach((k) => mask.add(k));      // a field in the mask but not in the body is removed (old note / ref after the order finished)
+  const qs = [...mask].map((k) => "updateMask.fieldPaths=" + encodeURIComponent(k)).join("&");
+  const r = await fetch(`${FS_BASE}/orders/bot_${encodeURIComponent(o.id)}?${qs}`, { method: "PATCH", headers: { authorization: "Bearer " + (await fsToken(env)), "content-type": "application/json" }, body: JSON.stringify({ fields: f }) });
+  if (!r.ok) {
+    const t = (await r.text().catch(() => "")).slice(0, 300);
+    console.error("mirrorOrder", r.status, t);
+    await fsWarn(env, `<b>⚠️ Admin Panel ကို Order မပို့နိုင်ပါ</b> (Firestore ${r.status})\n<code>${esc(t.slice(0, 200))}</code>\nOrder <code>${esc(o.id)}</code> ကို တစ်မိနစ်တစ်ခါ ပြန်ကြိုးစားပါမယ်`);
+  }
   return r.ok;
 }
+async function mirrorSafe(env, o) {
+  try { return await mirrorOrder(env, o); }
+  catch (e) {
+    console.error("mirrorOrder", e);
+    await fsWarn(env, `<b>⚠️ Admin Panel ကို Order မပို့နိုင်ပါ</b>\n<code>${esc(String((e && e.message) || e).slice(0, 200))}</code>\n<code>FIREBASE_SA</code> JSON ကို စစ်ပါ`).catch(() => {});
+    return false;
+  }
+}
+async function retryMirrors(env) {                       // every minute: orders whose admin-panel write failed
+  if (!KV) return;
+  const l = await KV.list({ prefix: "fsq:", limit: 10 });
+  if (!l.keys.length) await KV.delete("fsqany").catch(() => {});
+  for (const k of l.keys) {
+    const o = await KV.get("or:" + k.name.slice(4), "json").catch(() => null);
+    if (!o) { await KV.delete(k.name).catch(() => {}); continue; }
+    if (o.fsS === o.status || (await mirrorSafe(env, o))) { o.fsS = o.status; await KV.put("or:" + o.id, JSON.stringify(o), { expirationTtl: 90 * 86400 }).catch(() => {}); await KV.delete(k.name).catch(() => {}); }
+  }
+}
 async function saveOrder(o) {
-  if (ENVX && (o.status === "completed" || o.status === "failed") && o.fsS !== o.status && (await mirrorOrder(ENVX, o).catch((e) => { console.error("mirrorOrder", e); return false; }))) o.fsS = o.status;
+  if (OMEM.size > 400) OMEM.clear();
+  OMEM.set(o.id, o);
+  if (ENVX && FS_ST[o.status] && o.fsS !== o.status) {
+    if (await mirrorSafe(ENVX, o)) o.fsS = o.status;
+    else await Promise.all([KV.put("fsq:" + o.id, "1", { expirationTtl: 3 * 86400 }), KV.put("fsqany", "1", { expirationTtl: 3 * 86400 })].map((x) => x.catch(() => {})));
+  }
   const final = !["processing", "placing"].includes(o.status);
   if (final && !o.done) o.done = Date.now();
   if (o.kv === undefined) { o.kv = 1; o.fo = o.status === "placing" && !o.ref ? 0 : 1; o.fr = 0; }   // an order saved by the old code may already have its open: key
@@ -2245,6 +2516,7 @@ async function saveOrder(o) {
   if (putOpen) jobs.push(KV.put("open:" + o.id, "1", { expirationTtl: 3 * 86400 }), KV.put("openany", String(Date.now()), { expirationTtl: 3 * 86400 }));   // openany = time of the newest open order
   if (delOpen) jobs.push(KV.delete("open:" + o.id));
   if (putRef) jobs.push(KV.put("ref:g2:" + o.ref, o.id, { expirationTtl: 3 * 86400 }));   // callback lookup: G2Bulk order_id -> our order
+  if (o.fsS === o.status) jobs.push(KV.delete("fsq:" + o.id));
   await Promise.all(jobs.map((x) => x.catch(() => {})));
 }
 async function recordBought(o) {                        // what this bot already delivered to an ID (used by the status card)
@@ -2302,13 +2574,38 @@ async function sendReport(env, chat, uid, owner, kb) {
   }
   return send(env, chat, t.slice(0, 3900), { reply_markup: kb });
 }
+/* ONE card for several units of the same order (wp2 = 2 provider orders, 1 Telegram message).  Every unit is still its own order (own provider
+   id, own record, own admin-panel row); o.sib lists the unit ids of the card, and the card shows them added up: "Weekly Pass ×2" · total price ·
+   Processing until every unit has finished, then Completed / Failed / Unknown. */
+const OMEM = new Map();                                  // latest copy of the orders touched by this Worker instance (units of one card finish at different moments)
+async function groupCard(o) {                            // -> { text, markup }
+  let v = o;
+  if (Array.isArray(o.sib) && o.sib.length > 1) {
+    const us = (await Promise.all(o.sib.map(async (id) => (id === o.id ? o : OMEM.get(id) || (await KV.get("or:" + id, "json").catch(() => null)))))).filter(Boolean);
+    const n = o.sib.length, st = us.map((x) => x.status);
+    const open = st.some((x) => x === "placing" || x === "processing") || us.length < n;
+    const done = us.filter((x) => x.status === "completed").length, bad = us.filter((x) => x.status === "failed").length;
+    const status = open ? "processing" : st.includes("unknown") ? "unknown" : bad === 0 ? "completed" : done === 0 ? "failed" : "failed";
+    const live = us.filter((x) => x.status !== "failed"), billed = (live.length ? live : us).reduce((t, x) => t + (Number(x.price) || 0), 0);
+    v = {
+      ...o, id: o.sib[0], status, price: billed, amount: `${o.amount} ×${n}`,
+      delivery: us.flatMap((x) => (Array.isArray(x.delivery) ? x.delivery : [])),
+      ref: us.map((x) => x.ref).filter(Boolean).join(", "),
+      error: status === "failed" && done > 0 ? `${done}/${n} ပြီးပါပြီ — ${bad} ခု မအောင်မြင်ပါ (Provider မှာ စစ်ပါ)` : status === "unknown" ? UNSURE : (us.find((x) => x.error) || {}).error || "",
+      lowbal: (us.find((x) => x.lowbal != null) || {}).lowbal, done: Math.max(...us.map((x) => x.done || 0)) || o.done,
+    };
+    if (v.lowbal === undefined) delete v.lowbal;
+  }
+  return { text: orderText(v), markup: orderMarkup(v), v };
+}
 async function renderOrder(env, o) {
   await loadTpl(env).catch(() => {});
-  const put = (text) => tg(env, "editMessageText", { chat_id: o.chat, message_id: o.mid, text, parse_mode: "HTML", reply_markup: orderMarkup(o), disable_web_page_preview: true }).catch(() => null);
-  let text = orderText(o);
+  const card = await groupCard(o);
+  const put = (text) => tg(env, "editMessageText", { chat_id: o.chat, message_id: o.mid, text, parse_mode: "HTML", reply_markup: card.markup, disable_web_page_preview: true }).catch(() => null);
+  let text = card.text;
   let r = await put(text);
-  if (r && !r.ok && /parse|entit/i.test(r.description || "")) { text = orderText(o, true); r = await put(text); }   // a broken custom card never blocks the order result
-  if (r && !r.ok && !/not modified/i.test(r.description || "")) await send(env, o.chat, text, { reply_markup: orderMarkup(o) }).catch(() => {});
+  if (r && !r.ok && /parse|entit/i.test(r.description || "")) { text = orderText(card.v, true); r = await put(text); }   // a broken custom card never blocks the order result
+  if (r && !r.ok && !/not modified/i.test(r.description || "")) await send(env, o.chat, text, { reply_markup: card.markup }).catch(() => {});
   await notifyFinal(env, o).catch(() => {});
 }
 async function refreshOrder(env, id) {
@@ -2352,6 +2649,7 @@ async function pollOpenOrders(env, full) {              // every minute: finish 
     await Promise.all(l.keys.map((k) => refreshOrder(env, k.name.slice(5)).catch(() => {})));
   }
   await recoverPending(env).catch(() => {});
+  if (await KV.get("fsqany").catch(() => null)) await retryMirrors(env).catch(() => {});   // only when a write to the admin panel failed earlier
   if (full) await watchBalance(env).catch(() => {});
 }
 // Same message + same player + same package always gives the SAME key, so a double tap can never buy twice at the provider.
@@ -2372,8 +2670,9 @@ async function confirmOrder(env, chat, uid, ss, store, from) {
   try { return await confirmOrderInner(env, chat, uid, ss, store, from); } finally { PLACING.delete(lockKey); }
 }
 async function confirmOrderInner(env, chat, uid, ss, store, from) {
+  { const fresh = await loadStore(env, true).catch(() => null); if (fresh && fresh.groups) store = fresh; }   // never buy with a price copy that is a few seconds old
   const { group, entry, pkg } = ctxOf(store, ss);
-  if (!entry || !pkg || String(pkg.amount ?? "-") !== ss.amount || (Number(pkg.price) || 0) !== ss.price)
+  if (!entry || !pkg || String(pkg.amount ?? "-") !== ss.amount || priceOf(pkg) !== ss.price)
     return show(env, chat, ss, { text: "⚠️ Package / ဈေး ပြောင်းသွားပါပြီ — 🛒 ဝယ်ယူရန် ကနေ ပြန်ရွေးပါ", markup: { inline_keyboard: [] } });
   const pv = providerOf(entry, pkg);
   if (!pv.ok || !keyReady(env, pv)) return show(env, chat, ss, detailView(env, store, ss));
@@ -2409,7 +2708,12 @@ async function onAdminCallback(q, env) {
     const v = priceView(group, Number(p[2]) || 0, Number(p[3]) || 0, Number(p[4]) || 0, { pre: "zv", update: true, close: "zvx" });
     return editView(env, chat, mid, v);
   }
-  if (tag === "zr") { await ans("🔄 စစ်နေပါတယ်"); return refreshOrder(env, p[1]); }
+  if (tag === "zr") {
+    await ans("🔄 စစ်နေပါတယ်");
+    const o0 = await KV.get("or:" + p[1], "json").catch(() => null);
+    for (const id of (o0 && Array.isArray(o0.sib) && o0.sib.length > 1 ? o0.sib : [p[1]])) await refreshOrder(env, id);   // every unit of the card
+    return;
+  }
   if (tag === "zn") {
     await ans();
     if (await adminStart(env, uid, "")) return;
@@ -2425,7 +2729,7 @@ async function onAdminCallback(q, env) {
     const gone = (text) => tg(env, "editMessageText", { chat_id: chat, message_id: mid, text, reply_markup: { inline_keyboard: [] } }).catch(() => {});
     if (!rec) { await ans("⌛ ကြာသွားပါပြီ — ပြန်ပို့ပါ", true); return gone("⌛ ကြာသွားပါပြီ — ဘာမှ မဝယ်ရပါ · ပြန်ပို့ပါ"); }
     if (await KV.get("bcd:" + p[1]).catch(() => null)) return ans("⏳ ဝယ်နေပါပြီ", true);
-    const store = await loadStore(env);
+    const store = await loadStore(env, true);
     if (!store.groups) return ans("Store data မရနိုင်သေးပါ — ခဏနေ ပြန်နှိပ်ပါ", true);
     await KV.put("bcd:" + p[1], "1", { expirationTtl: 3600 }).catch(() => {});      // a second tap finds it already taken
     await KV.delete("bc:" + p[1]).catch(() => {});
@@ -2436,7 +2740,7 @@ async function onAdminCallback(q, env) {
       const u = { line: it.line, group, entry, pkg, pv, pid: it.pid, sid: it.sid, sname: it.sname, pname: it.pname };
       for (let n = 0; n < it.n; n++) units.push(u);
     }
-    if (units.reduce((n, u) => n + (Number(u.pkg.price) || 0), 0) !== rec.total) { await ans("ဈေးပြောင်းသွားပါပြီ", true); return gone("✗ ဈေးပြောင်းသွားပါပြီ — ဘာမှ မဝယ်ရပါ · ပြန်ပို့ပါ"); }
+    if (units.reduce((n, u) => n + priceOf(u.pkg), 0) !== rec.total) { await ans("ဈေးပြောင်းသွားပါပြီ", true); return gone("✗ ဈေးပြောင်းသွားပါပြီ — ဘာမှ မဝယ်ရပါ · ပြန်ပို့ပါ"); }
     await ans("⏳ ဝယ်နေပါတယ်");
     await gone("⏳ <b>ဝယ်နေပါတယ်...</b>");
     await runBatch(env, { message_id: rec.rep ? mid : rec.m.id, chat: { id: chat, title: rec.m.title }, from: rec.rep ? q.from : rec.m.from }, q.message.chat.type !== "private", units);
@@ -2445,7 +2749,7 @@ async function onAdminCallback(q, env) {
   if (tag === "zrb") {                                    // 🔁 the same order again (always asks first)
     const o = await KV.get("or:" + p[1], "json").catch(() => null);
     if (!o) return ans("Order မတွေ့ပါ", true);
-    const store = await loadStore(env);
+    const store = await loadStore(env, true);
     if (!store.groups) return ans("Store data မရနိုင်သေးပါ", true);
     const group = store.groups.find((g) => g.name === o.game), entry = group && group.entries.find((e) => (e.server || "") === (o.server || "")), pkg = entry && entry.packages.find((x) => String(x.amount ?? "-") === o.amount);
     if (!pkg) return ans("Package မတွေ့တော့ပါ", true);
@@ -2454,14 +2758,14 @@ async function onAdminCallback(q, env) {
     if (rq.needsChar || o.cname) return ans("Character Name လိုတဲ့ game — 🛒 ခလုတ်နဲ့ ဝယ်ပါ", true);
     if (rq.needsServer && !o.sid) return ans("Server ID မပါပါ", true);
     await ans();
-    return askConfirm(env, { message_id: 0, chat: q.message.chat, from: q.from }, q.message.chat.type !== "private", [{ line: "🔁", group, entry, pkg, pv, pid: o.pid, sid: o.sid || "", sname: o.sname || "", pname: o.pname || "" }], Number(pkg.price) || 0, ["🔁 ယခင် Order ကို ထပ်ဝယ်ခြင်း"], { rep: true });
+    return askConfirm(env, { message_id: 0, chat: q.message.chat, from: q.from }, q.message.chat.type !== "private", [{ line: "🔁", group, entry, pkg, pv, pid: o.pid, sid: o.sid || "", sname: o.sname || "", pname: o.pname || "" }], priceOf(pkg), ["🔁 ယခင် Order ကို ထပ်ဝယ်ခြင်း"], { rep: true });
   }
   let ss = await getSS(uid);
   if (!ss && tag === "zl") ss = { step: "list", src: "" };
   if (!ss) return ans("Session ကုန်သွားပါပြီ — 🛒 ဝယ်ယူရန် ကို ပြန်နှိပ်ပါ", true);
   const stale = !!ss.mid && ss.mid !== mid;             // a button of an older card must never confirm the newest order
   ss.mid = mid;
-  const store = await loadStore(env);
+  const store = await loadStore(env, false, STORE_FRESH_MS);
   if (!store.groups) return ans("Store data မရနိုင်သေးပါ", true);
   const save = () => putSS(uid, ss);
   if (tag === "zx") { await ans(); await delSS(uid); return tg(env, "editMessageText", { chat_id: chat, message_id: mid, text: "❌ ပယ်ဖျက်ပြီးပါပြီ", reply_markup: { inline_keyboard: [[btn("🛒 ပြန်စမယ်", "zn", "primary")]] } }).catch(() => {}); }
@@ -2781,7 +3085,7 @@ async function onPrivate(m, env) {
     if (/^[\p{L}\p{N}_.-]{1,12}$/u.test(t) && !/^\d{5,}$/.test(t)) {      // just the game abbreviation ("ml") -> that game's price list, tabs as buttons
       const s0 = await getSS(uid);
       if (!(s0 && ["id", "char"].includes(s0.step))) {
-        const store = await loadStore(env);
+        const store = await loadStore(env, false, STORE_FRESH_MS);
         const g = store.groups ? (await abbrMap(store)).get(t.toLowerCase()) : null;
         if (g) {
           const og = store.byId.get(g.id) || g;
@@ -2791,6 +3095,7 @@ async function onPrivate(m, env) {
         }
       }
     }
+    if (await gameListCommand(env, m, m.text, true)) return;   // "ml list" -> that game's whole list, ready to copy
     if (await autoBuy(env, m, false)) return;          // "abbr ID [server] package" -> bought at once
     { const s0 = await getSS(uid);                     // "86" / "wp 2" / "86 172 wp" / "diamond" -> price card (not while the bot waits for an ID / Character Name)
       if (!(s0 && ["id", "char"].includes(s0.step)) && (await priceQuote(env, m, true))) return; }
