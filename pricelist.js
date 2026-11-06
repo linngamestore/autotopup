@@ -3238,17 +3238,25 @@ export default {
     if (url.pathname === "/migrate") {                    // one time: copy the saved settings (cards, abbreviations, menu icons, groups) from KV (STATE) into D1 (DB)
       if (url.searchParams.get("key") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
       if (!env.DB || !env.STATE) return new Response("DB (D1) နဲ့ STATE (KV) binding နှစ်ခုလုံး ရှိမှ ကူးလို့ရပါမယ်", { status: 400 });
-      const to = d1Kv(env.DB); let n = 0;
-      for (const k of ["tpl:all", "abbr:all", "kbi", "bal:g2"]) { const v = await env.STATE.get(k); if (v !== null) { await to.put(k, v); n++; } }
+      const to = d1Kv(env.DB); let n = 0; const errs = [];
+      const em = (e) => String((e && e.message) || e).slice(0, 160);
+      const copy = async (k) => {
+        try { const v = await env.STATE.get(k); if (v !== null) { await to.put(k, v); n++; } }
+        catch (e) { errs.push(k + " -> " + em(e)); }
+      };
+      try { await to.get("__ping"); } catch (e) { errs.push("D1 -> " + em(e)); }   // shows a D1 problem (table / binding) clearly
+      for (const k of ["tpl:all", "abbr:all", "kbi", "bal:g2"]) await copy(k);
       for (const pre of ["grp:", "gg:", "menu:"]) {
-        for (let cursor; ;) {
-          const l = await env.STATE.list({ prefix: pre, cursor });
-          for (const k of l.keys) { const v = await env.STATE.get(k.name); if (v !== null) { await to.put(k.name, v); n++; } }
-          if (l.list_complete) break;
-          cursor = l.cursor;
-        }
+        try {
+          for (let cursor; ;) {
+            const l = await env.STATE.list({ prefix: pre, cursor });
+            for (const k of l.keys) await copy(k.name);
+            if (l.list_complete) break;
+            cursor = l.cursor;
+          }
+        } catch (e) { errs.push("list " + pre + " -> " + em(e)); }
       }
-      return new Response("ကူးပြီးပါပြီ — " + n + " ခု");
+      return new Response("ကူးပြီးပါပြီ — " + n + " ခု" + (errs.length ? "\n\nမအောင်မြင်တာများ (" + errs.length + "):\n" + errs.join("\n") : ""), { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
     if (!ORIGIN || ORIGIN !== url.origin) ORIGIN = url.origin;
     if (url.pathname === "/g2hook") {                    // G2Bulk "order finished" callback
