@@ -144,10 +144,12 @@ async function tg(env, method, body) {
   if (method === "sendMessage" || method === "editMessageText") {             // inline buttons go INSIDE the message (rich); any refusal -> the classic message below
     let blocks = null;
     try { blocks = richBlocksFor(method, body); } catch { blocks = null; }
+    const usedCe = !!(blocks && RICH_USED_CE);
     if (blocks) {
       const { text, parse_mode, reply_markup, disable_web_page_preview, link_preview_options, ...rest } = body;
       const rj = await tg(env, method === "sendMessage" ? "sendRichMessage" : "editMessageText", { ...rest, rich_message: { blocks } }).catch(() => null);
       if (rj && (rj.ok || /not modified/i.test(rj.description || ""))) return rj;
+      if (usedCe && rj && rj.error_code === 400 && !/not found|blocked|deactivated|can't be edited|forbidden|kicked/i.test(rj.description || "")) RICH_CE_BROKEN = true;   // Telegram does not take the premium emoji node: those cards go the classic way from now on
     }
   }
   let kbOrig = null;
@@ -196,7 +198,12 @@ async function tg(env, method, body) {
    Cards with quote blocks / code blocks / premium emoji keep the classic keyboard (a rich message cannot show those faithfully):
    set RICH_FLATTEN_QUOTE = true to convert the quote cards too (the quote box then becomes plain lines). */
 const RICH_INLINE_BUTTONS = true;
-const RICH_FLATTEN_QUOTE = false;
+const RICH_FLATTEN_QUOTE = true;    // quote cards (Order card, Quote card ...) now ALSO become rich messages: the quote box turns into plain lines, buttons sit inside the message
+/* PREMIUM EMOJI inside rich messages: <tg-emoji> in a card is sent as a rich "custom_emoji" node. If Telegram refuses it, RICH_CE_BROKEN is set and
+   every card that carries a premium emoji is sent the classic way (premium emoji kept) - a premium emoji is NEVER turned into the plain emoji any more. */
+const RICH_CUSTOM_EMOJI = true;
+let RICH_CE_BROKEN = false;
+let RICH_USED_CE = false;           // set by htmlToRichBlocks() when the blocks it just built contain a custom_emoji node
 const BTN_ROW_PX = 1010;
 const BTN_BUBBLE_PX = 970;
 const BTN_GAP_PX = 20;
@@ -275,8 +282,10 @@ function richButtonRows(rows) {
 }
 const RICH_TAGS = { b: 'bold', strong: 'bold', i: 'italic', em: 'italic', u: 'underline', ins: 'underline', s: 'strikethrough', strike: 'strikethrough', del: 'strikethrough', code: 'code', 'tg-spoiler': 'spoiler' };
 function htmlToRichBlocks(html) {
+  RICH_USED_CE = false;
   if (/<pre[\s>]/i.test(html)) return null;
   if (!RICH_FLATTEN_QUOTE && /<blockquote[\s>]/i.test(html)) return null;   // quote cards stay classic
+  if (/<tg-emoji[\s>]/i.test(html) && (!RICH_CUSTOM_EMOJI || RICH_CE_BROKEN)) return null;   // premium emoji cannot be shown in a rich message -> classic message keeps it
   const dec = (t) => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
   const conv = (n) => {
     const kids = n.arr.map(x => (typeof x === 'string' ? x : conv(x))).filter(x => x !== '' && x !== null);
@@ -284,6 +293,11 @@ function htmlToRichBlocks(html) {
     if (!kids.length) return '';
     if (RICH_TAGS[n.tag]) return { type: RICH_TAGS[n.tag], text: inner };
     if (n.tag === 'a') return n.href ? { type: 'url', text: inner, url: n.href } : inner;
+    if (n.tag === 'tg-emoji' && n.cid) {
+      const flat = (x) => (typeof x === 'string' ? x : Array.isArray(x) ? x.map(flat).join('') : (x && x.text !== undefined ? flat(x.text) : ''));
+      RICH_USED_CE = true;
+      return { type: 'custom_emoji', custom_emoji_id: n.cid, text: flat(inner) || '⭐' };
+    }
     return inner; // blockquote / span
   };
   const blocks = [];
@@ -291,26 +305,29 @@ function htmlToRichBlocks(html) {
   for (const line of html.split('\n')) {
     const root = { tag: '', arr: [] };
     const chain = [root];
-    const open = (tag, href) => { const n = { tag, href, arr: [] }; chain[chain.length - 1].arr.push(n); chain.push(n); };
-    carry.forEach(c => open(c.tag, c.href));
+    const open = (tag, href, cid) => { const n = { tag, href, cid, arr: [] }; chain[chain.length - 1].arr.push(n); chain.push(n); };
+    carry.forEach(c => open(c.tag, c.href, c.cid));
     const toks = line.match(/<\/?[a-zA-Z][^>]*>|[^<]+|</g) || [];
     for (const tk of toks) {
       if (tk[0] === '<' && tk.length > 1) {
         const m = tk.match(/^<(\/?)([a-zA-Z-]+)([^>]*)>$/);
         if (!m) return null;
         const tag = m[2].toLowerCase();
-        if (!(RICH_TAGS[tag] || tag === 'a' || tag === 'blockquote' || tag === 'span')) return null;
+        if (!(RICH_TAGS[tag] || tag === 'a' || tag === 'blockquote' || tag === 'span' || tag === 'tg-emoji')) return null;
         if (m[1]) { if (chain.length > 1 && chain[chain.length - 1].tag === tag) chain.pop(); }
         else {
           const h = m[3].match(/href\s*=\s*"([^"]*)"/i);
-          open(tag, h ? dec(h[1]) : '');
+          const ce = tag === 'tg-emoji' ? m[3].match(/emoji-id\s*=\s*"(\d+)"/i) : null;
+          open(tag, h ? dec(h[1]) : '', ce ? ce[1] : '');
         }
       } else chain[chain.length - 1].arr.push(dec(tk));
     }
-    carry = chain.slice(1).map(n => ({ tag: n.tag, href: n.href }));
+    carry = chain.slice(1).map(n => ({ tag: n.tag, href: n.href, cid: n.cid }));
     const out = conv(root);
     if (out !== '' && !(typeof out === 'string' && !out.trim())) blocks.push({ type: 'paragraph', text: out });
+    else if (blocks.length && blocks[blocks.length - 1].text !== '\u2800') blocks.push({ type: 'paragraph', text: '\u2800' });   // a blank line of the card = a small gap between the parts
   }
+  while (blocks.length && blocks[blocks.length - 1].text === '\u2800') blocks.pop();
   return blocks.length ? blocks : null;
 }
 // the rich blocks for a sendMessage / editMessageText payload, or null = send it the classic way
@@ -731,6 +748,9 @@ function tabsOf(entry) {
 const rbCell = (t, header) => ({ text: String(t), align: "left", valign: "middle", ...(header ? { is_header: true } : {}) });
 const rbTable = (heads, rows) => ({ type: "table", is_bordered: true, is_compact: true, cells: [heads.map((h) => rbCell(h, true)), ...rows.map((r) => r.map((c) => rbCell(c)))] });
 const rbPara = (t) => ({ type: "paragraph", text: { type: "bold", text: String(t) } });
+// Header of a price card. Plain template -> bold line (as before). Formatted template (bold / premium emoji ...) -> kept as it is;
+// null = cannot be shown in a rich message, the caller sends the classic message (premium emoji intact).
+const headBlocks = (html) => (isPlainTpl(html) ? [rbPara(htmlToText(html))] : htmlToRichBlocks(html));
 const width = (s) => [...String(s)].length;
 function boxTable(head, rows) {     // plain-text fallback when the rich table is refused
   const widths = head.map((h, i) => Math.max(width(h), ...rows.map((r) => width(r[i]))));
@@ -752,12 +772,12 @@ async function sendTable(env, chat, reply, group, entry, label, rows) {
       label: esc(label), part: chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "",
     });
     const cap = htmlToText(html);
-    const blocks = [rbPara(cap), rbTable(head, chunks[i])];   // header + table always ONE message, so deleting it removes everything together
-    let r = await tg(env, "sendRichMessage", { chat_id: chat, rich_message: { blocks }, ...replyTo(reply) }).catch(() => null);
-    if (!r?.ok) {                                   // fallback: monospace box table (split small enough for one message)
+    const hb = headBlocks(html);                    // premium emoji / formatting of the card header are kept
+    let r = hb ? await tg(env, "sendRichMessage", { chat_id: chat, rich_message: { blocks: [...hb, rbTable(head, chunks[i])] }, ...replyTo(reply) }).catch(() => null) : null;   // header + table always ONE message, so deleting it removes everything together
+    if (!r?.ok) {                                   // fallback: classic header (premium emoji intact) + monospace box table (split small enough for one message)
       const part = chunks[i];
       for (let j = 0; j < part.length; j += 25) {
-        r = await send(env, chat, `${plain ? `<b>${esc(cap)}</b>\n` : ""}<pre>${esc(boxTable(head, part.slice(j, j + 25)))}</pre>`, replyTo(reply)).catch(() => null);
+        r = await send(env, chat, `${j === 0 ? (plain ? `<b>${esc(cap)}</b>\n` : html + "\n") : ""}<pre>${esc(boxTable(head, part.slice(j, j + 25)))}</pre>`, replyTo(reply)).catch(() => null);
         if (r?.result?.message_id) ids.push(r.result.message_id);
       }
       continue;
@@ -843,7 +863,8 @@ function priceView(group, ei, ti, pg, o) {                // o: { pre: callback 
   const head = isPlainTpl(tplNow().ptable) ? `<b>${esc(htmlToText(html))}</b>` : html;
   const part = tab.rows.slice(pg * PV_ROWS, pg * PV_ROWS + PV_ROWS);
   const table = boxTable(["Package", "Price (MMK)"], part);
-  const rich = [rbPara(htmlToText(html)), rbTable(["Package", "Price (MMK)"], part), ...richButtonRows(rows)];   // table + buttons = one message, rows padded to one common width
+  const hb = headBlocks(html);
+  const rich = hb ? [...hb, rbTable(["Package", "Price (MMK)"], part), ...richButtonRows(rows)] : undefined;   // table + buttons = one message, rows padded to one common width (no rich = classic card, premium emoji intact)
   return { text: `${head}\n<pre>${esc(table)}</pre>`, markup: { inline_keyboard: rows }, rich };
 }
 // A view that carries "rich" is sent / edited as a rich message (bordered table, buttons inside it); if Telegram refuses, the old text + inline keyboard is used.
@@ -3268,7 +3289,8 @@ export default {
     }
     if (req.method !== "POST") return new Response("OK");
     if (req.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
-    const update = await req.json();
+    const update = await req.json().catch(() => null);   // a non-JSON POST used to throw -> HTTP 500 -> Telegram kept retrying it
+    if (!update || typeof update !== "object") return new Response("OK");
     if (update.callback_query) {   // never leave a tapped button spinning while the real work runs
       const cid = update.callback_query.id;
       ctx.waitUntil(new Promise((r) => setTimeout(r, Number(env.CB_FAST_ACK_MS) >= 0 && env.CB_FAST_ACK_MS !== undefined && env.CB_FAST_ACK_MS !== "" ? Number(env.CB_FAST_ACK_MS) : CB_FAST_ACK_MS))
